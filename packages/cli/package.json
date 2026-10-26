@@ -1,0 +1,17 @@
+{
+  "name": "@supacode/cli",
+  "version": "0.1.0",
+  "description": "CLI SupaCode : router et lancer une demande vers Claude ou Codex.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "supacode": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@supacode/core": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "supacode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SupaCode : un IDE pour coder avec l'IA, avec un orchestrateur qui choisit le bon agent et le bon modèle.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b packages/core packages/cli",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
