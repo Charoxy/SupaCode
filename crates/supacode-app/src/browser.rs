@@ -1,6 +1,10 @@
 //! Navigateur intégré : une WebView2 (via `wry`) posée sur la fenêtre, à l'emplacement
 //! que GPUI lui réserve dans le panneau de droite.
 //!
+//! GPUI dessine avec DirectComposition au-dessus de ses fenêtres enfants : une WebView
+//! enfant resterait invisible. Sous Windows, la page vit donc dans une petite fenêtre
+//! sans bordure appartenant à celle de SupaCode (voir `host`), recollée à chaque image.
+//!
 //! L'utilisateur peut y sélectionner des éléments ou dessiner par-dessus la page, puis
 //! envoyer le tout (avec une capture) à l'agent. Les agents le pilotent avec les outils
 //! MCP de `crate::mcp`, traités par `call_tool`.
@@ -58,8 +62,11 @@ pub struct BrowserView {
     webview: Option<Rc<WebView>>,
     _context: Option<Rc<RefCell<WebContext>>>,
     error: Option<String>,
-    /// Emplacement réservé par GPUI, appliqué à la vue native dès qu'elle existe.
-    placed: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Emplacement réservé par GPUI (et position de la fenêtre), appliqué à la vue native.
+    placed: Rc<Cell<Option<(Bounds<Pixels>, Point<Pixels>)>>>,
+    /// Fenêtre qui porte la page (0 tant qu'elle n'existe pas), et celle de SupaCode.
+    host: Rc<Cell<isize>>,
+    owner: isize,
     address: Entity<InputState>,
     comment: Entity<InputState>,
     url: String,
@@ -101,14 +108,18 @@ impl BrowserView {
         let context = Rc::new(RefCell::new(WebContext::new(dirs::data_local_dir().map(|d| d.join("SupaCode").join("Navigateur")))));
         let start = url.as_deref().map(normalize_url).unwrap_or_else(|| "about:blank".into());
         let (ipc, load, popup) = (sender.clone(), sender.clone(), sender);
-        let parent = window.window_handle().map(|h| ParentWindow(h.as_raw()));
-        let (ready, built) = async_channel::bounded::<Result<WebView, String>>(1);
+        let owner = window.window_handle().map(|h| h.as_raw()).map_err(|e| e.to_string());
+        let owner_id = match owner {
+            Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+            _ => 0,
+        };
+        let (ready, built) = async_channel::bounded::<Result<(WebView, isize), String>>(1);
         let (build_context, url) = (context.clone(), start.clone());
         outside_gpui(move || {
-            let parent = match parent {
-                Ok(parent) => parent,
+            let (parent, host) = match host::create(owner) {
+                Ok(created) => created,
                 Err(e) => {
-                    let _ = ready.try_send(Err(e.to_string()));
+                    let _ = ready.try_send(Err(e));
                     return;
                 }
             };
@@ -134,18 +145,19 @@ impl BrowserView {
                     NewWindowResponse::Deny
                 })
                 .build_as_child(&parent);
-            let _ = ready.try_send(built.map_err(|e| e.to_string()));
+            let _ = ready.try_send(built.map(|webview| (webview, host)).map_err(|e| e.to_string()));
         });
 
         let arrival = cx.spawn(async move |this, cx| {
             let Ok(built) = built.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
                 match built {
-                    Ok(webview) => {
-                        if let Some(bounds) = this.placed.get() {
-                            let _ = webview.set_bounds(rect(bounds));
-                        }
-                        let _ = webview.set_visible(this.shown);
+                    Ok((webview, host)) => {
+                        this.host.set(host);
+                        host::show(host, this.shown);
+                        let _ = webview.set_visible(true);
+                        // La prochaine image place la fenêtre de la page.
+                        this.placed.set(None);
                         // Une adresse demandée pendant le démarrage.
                         if this.url != this.start {
                             let _ = webview.load_url(&this.url);
@@ -164,12 +176,20 @@ impl BrowserView {
                 }
             }
         });
+        // Fenêtre déplacée ou redimensionnée : la page suit.
+        cx.observe_window_bounds(window, |this, _, cx| {
+            this.placed.set(None);
+            cx.notify();
+        })
+        .detach();
         address.update(cx, |a, cx| a.set_value(if start == "about:blank" { String::new() } else { start.clone() }, window, cx));
         Self {
             webview: None,
             _context: Some(context),
             error: None,
             placed: Rc::new(Cell::new(None)),
+            host: Rc::new(Cell::new(0)),
+            owner: owner_id,
             start: start.clone(),
             address,
             comment,
@@ -191,16 +211,7 @@ impl BrowserView {
     pub fn set_shown(&mut self, shown: bool) {
         if shown != self.shown {
             self.shown = shown;
-            if let Some(webview) = &self.webview {
-                let _ = webview.set_visible(shown);
-            }
-        }
-    }
-
-    /// Rend le clavier à SupaCode après un clic hors de la page.
-    pub fn release_focus(&self) {
-        if let Some(webview) = &self.webview {
-            let _ = webview.focus_parent();
+            host::show(self.host.get(), shown);
         }
     }
 
@@ -259,7 +270,8 @@ impl BrowserView {
         let shown = if self.url == "about:blank" { String::new() } else { self.url.clone() };
         let address = self.address.clone();
         cx.defer(move |cx| {
-            if let Some(window) = cx.active_window() {
+            // SupaCode n'a qu'une fenêtre, active ou non.
+            if let Some(window) = cx.active_window().or_else(|| cx.windows().into_iter().next()) {
                 let _ = window.update(cx, |_, window, cx| {
                     address.update(cx, |a, cx| {
                         if !a.focus_handle(cx).is_focused(window) {
@@ -412,6 +424,134 @@ impl BrowserView {
     }
 }
 
+impl Drop for BrowserView {
+    fn drop(&mut self) {
+        // La page d'abord, puis la fenêtre qui la porte.
+        self.webview = None;
+        host::destroy(self.host.get());
+    }
+}
+
+/// Fenêtre qui porte la page.
+#[cfg(windows)]
+mod host {
+    use std::num::NonZeroIsize;
+
+    use gpui_kit::{Bounds, Pixels, Point};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::w;
+    use wry::WebView;
+    use wry::dpi::{LogicalPosition, LogicalSize};
+    use wry::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+
+    use super::ParentWindow;
+
+    unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Un clic dans la page ne doit pas éteindre la barre de titre de SupaCode.
+        if message == WM_NCACTIVATE {
+            return LRESULT(1);
+        }
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    /// Fenêtre sans bordure, hors de la barre des tâches, appartenant à celle de SupaCode
+    /// (elle reste donc au-dessus d'elle et se réduit avec elle).
+    pub fn create(owner: Result<RawWindowHandle, String>) -> Result<(ParentWindow, isize), String> {
+        let owner = match owner? {
+            RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            _ => return Err("fenêtre inattendue".into()),
+        };
+        unsafe {
+            let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
+            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: w!("SupaCodeNavigateur"), ..Default::default() };
+            // Déjà enregistrée si le navigateur a été rouvert : sans importance.
+            RegisterClassW(&class);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("SupaCodeNavigateur"),
+                w!("Navigateur SupaCode"),
+                WS_POPUP | WS_CLIPCHILDREN,
+                0,
+                0,
+                1,
+                1,
+                Some(HWND(owner as _)),
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            let id = hwnd.0 as isize;
+            let handle = Win32WindowHandle::new(NonZeroIsize::new(id).ok_or("fenêtre nulle")?);
+            Ok((ParentWindow(RawWindowHandle::Win32(handle)), id))
+        }
+    }
+
+    /// Colle la fenêtre sur l'emplacement réservé par GPUI (coordonnées de la fenêtre de SupaCode).
+    pub fn place(host: isize, _owner: isize, origin: Point<Pixels>, bounds: Bounds<Pixels>, scale: f32, webview: &WebView) {
+        if host == 0 {
+            return;
+        }
+        let (x, y) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        // Les coordonnées de GPUI partent du coin de la fenêtre, barre de titre comprise.
+        let point = POINT { x: ((f32::from(origin.x) + x) * scale).round() as i32, y: ((f32::from(origin.y) + y) * scale).round() as i32 };
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(host as _),
+                None,
+                point.x,
+                point.y,
+                (width * scale).round() as i32,
+                (height * scale).round() as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let _ = webview.set_bounds(wry::Rect { position: LogicalPosition::new(0.0, 0.0).into(), size: LogicalSize::new(width as f64, height as f64).into() });
+    }
+
+    pub fn show(host: isize, shown: bool) {
+        if host != 0 {
+            unsafe {
+                let _ = ShowWindow(HWND(host as _), if shown { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
+    }
+
+    pub fn destroy(host: isize) {
+        if host != 0 {
+            unsafe {
+                let _ = DestroyWindow(HWND(host as _));
+            }
+        }
+    }
+}
+
+/// Ailleurs : la page est une vue enfant de la fenêtre.
+#[cfg(not(windows))]
+mod host {
+    use gpui_kit::{Bounds, Pixels, Point};
+    use wry::WebView;
+    use wry::raw_window_handle::RawWindowHandle;
+
+    use super::ParentWindow;
+
+    pub fn create(owner: Result<RawWindowHandle, String>) -> Result<(ParentWindow, isize), String> {
+        Ok((ParentWindow(owner?), 0))
+    }
+
+    pub fn place(_: isize, _: isize, _: Point<Pixels>, bounds: Bounds<Pixels>, _: f32, webview: &WebView) {
+        let _ = webview.set_bounds(super::rect(bounds));
+    }
+
+    pub fn show(_: isize, _: bool) {}
+
+    pub fn destroy(_: isize) {}
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn rect(bounds: Bounds<Pixels>) -> Rect {
     Rect {
         position: LogicalPosition::new(f32::from(bounds.origin.x) as f64, f32::from(bounds.origin.y) as f64).into(),
@@ -826,7 +966,7 @@ impl Render for BrowserView {
         });
 
         let webview = self.webview.clone();
-        let placed = self.placed.clone();
+        let (placed, host, owner) = (self.placed.clone(), self.host.clone(), self.owner);
         let page = match &self.error {
             Some(error) => div().flex_1().min_h_0().p_6().flex().items_center().justify_center().text_color(T.err).child(error.clone()).into_any_element(),
             None => div()
@@ -834,11 +974,12 @@ impl Render for BrowserView {
                 .min_h_0()
                 .child(
                     canvas(
-                        move |bounds, _, _| {
-                            if placed.get() != Some(bounds) {
-                                placed.set(Some(bounds));
+                        move |bounds, window, _| {
+                            let key = (bounds, window.bounds().origin);
+                            if placed.get() != Some(key) {
                                 if let Some(webview) = &webview {
-                                    let _ = webview.set_bounds(rect(bounds));
+                                    placed.set(Some(key));
+                                    host::place(host.get(), owner, window.bounds().origin, bounds, window.scale_factor(), webview);
                                 }
                             }
                         },

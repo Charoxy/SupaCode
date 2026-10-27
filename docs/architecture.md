@@ -97,7 +97,7 @@ L'IDE est une application native en Rust, construite sur GPUI (le moteur d'inter
 
 Une nouvelle conversation est lancée avec `claude --session-id <uuid>` : l'IDE connaît son identifiant dès le départ et affiche son vrai titre dès que Claude Code l'enregistre. Les étapes d'agent des workflows utilisent `--no-session-persistence` pour ne pas encombrer la liste des conversations.
 
-La WebView2 est créée depuis un minuteur Win32 (`SetTimer`) plutôt que depuis une mise à jour de GPUI : sa création fait tourner une boucle de messages imbriquée, qui rappellerait GPUI alors que l'application est déjà empruntée.
+GPUI dessine avec DirectComposition par-dessus ses fenêtres enfants : la WebView2 vit donc dans une petite fenêtre sans bordure appartenant à celle de SupaCode, recollée sur le panneau à chaque image et à chaque déplacement. Elle est créée depuis un minuteur Win32 (`SetTimer`) plutôt que depuis une mise à jour de GPUI : sa création fait tourner une boucle de messages imbriquée, qui rappellerait GPUI alors que l'application est déjà empruntée.
 
 ## Feuille de route
 

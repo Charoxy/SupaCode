@@ -1020,12 +1020,6 @@ impl Render for Workspace {
                 this.layout_dirty = true;
                 cx.notify();
             }))
-            // Un clic dans SupaCode reprend le clavier à la page web.
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if let Some(browser) = &this.browser {
-                    browser.read(cx).release_focus();
-                }
-            }))
             .capture_any_mouse_up(cx.listener(|this, _, _, _| {
                 if std::mem::take(&mut this.layout_dirty) {
                     save_layout(this.layout);
