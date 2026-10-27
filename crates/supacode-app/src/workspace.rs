@@ -2231,6 +2231,8 @@ impl Workspace {
         }
         let search = div()
             .id("titlebar-search")
+            // Sinon la barre, zone de glisser de la fenêtre, prend le clic.
+            .occlude()
             .w(px(320.0))
             .flex_shrink(1.0)
             .min_w(px(160.0))
