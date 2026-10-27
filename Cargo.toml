@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/supacode-core", "crates/supacode-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Charoxy <charoxy59@gmail.com>"]
+
+[workspace.dependencies]
+supacode-core = { path = "crates/supacode-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.dev]
+# GPUI est lent en debug sans optimisation des dépendances.
+[profile.dev.package."*"]
+opt-level = 2

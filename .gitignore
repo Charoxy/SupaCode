@@ -1,5 +1,5 @@
 node_modules/
 dist/
 *.tsbuildinfo
-ide/vscodium/
 .env
+target/

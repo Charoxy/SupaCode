@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { withoutClaudeSession } from "../claude/env.js";
 import type { AgentEvent } from "../types.js";
 
 export type SpawnLine = { stream: "stdout" | "stderr"; line: string };
@@ -8,6 +9,10 @@ export type SpawnItem = SpawnLine | { exitCode: number };
 export interface SpawnOptions {
   cwd: string;
   signal?: AbortSignal;
+  /** Passe `cmd` au shell du système (sh ou cmd.exe) ; `args` doit alors être vide. */
+  shell?: boolean;
+  /** Variables d'environnement ajoutées à celles du processus courant. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -19,6 +24,8 @@ export async function* spawnLines(cmd: string, args: string[], options: SpawnOpt
   const child = spawn(cmd, args, {
     cwd: options.cwd,
     signal: options.signal,
+    shell: options.shell,
+    env: withoutClaudeSession({ ...process.env, ...options.env }),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

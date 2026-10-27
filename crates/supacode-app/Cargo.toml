@@ -1,0 +1,23 @@
+[package]
+name = "supacode-app"
+description = "SupaCode : l'IDE natif pour coder avec l'IA."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "supacode"
+path = "src/main.rs"
+
+[dependencies]
+supacode-core.workspace = true
+anyhow.workspace = true
+gpui-kit = "0.8.1"
+alacritty_terminal = "0.26"
+async-channel = "2"
+notify = "8"
+similar = "2"
+dirs = "6"
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }

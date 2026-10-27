@@ -1,0 +1,13 @@
+[package]
+name = "supacode-core"
+description = "Cœur SupaCode : projets et conversations Claude, orchestrateur, workflows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+dirs = "6"

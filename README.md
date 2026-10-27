@@ -6,9 +6,10 @@ Tu décris ce que tu veux. L'orchestrateur de SupaCode classe la demande (questi
 
 ## Ce qui marche aujourd'hui
 
-- `@supacode/core` : classifieur de demandes (mots-clés français et anglais), routeur configurable, pilotage des CLI `claude` et `codex` avec un flux d'événements commun (texte, outils, erreurs, fin).
-- `@supacode/cli` : la commande `supacode` pour voir la décision de routage (`route`) ou lancer la demande (`run`).
-- `ide/` : le script qui récupère VSCodium et applique nos patchs (base de l'IDE à venir).
+- **L'IDE** (`crates/`) : une application native écrite en Rust (GPUI), organisée en trois colonnes. À gauche, tes projets et leurs conversations Claude Code, puis tes workflows. Au centre, la conversation elle-même, c'est-à-dire la vraie CLI `claude` dans un terminal intégré. À droite, l'aperçu du code que Claude modifie (avec son diff), mis à jour en direct, ou le suivi d'un workflow en cours avec ses cartes de validation.
+- **Les workflows** : des enchaînements d'étapes (commandes, agents, validations, étapes en parallèle) avec conditions et variables, décrits dans `.supacode/workflows/*.json`. Ils se déclenchent à la main, au commit ou au push (hooks git), ou à l'enregistrement d'un fichier.
+- `@supacode/core` : classifieur de demandes (mots-clés français et anglais), routeur configurable, pilotage des CLI `claude` et `codex` avec un flux d'événements commun, et moteur de workflows.
+- `@supacode/cli` : la commande `supacode` (`route`, `run`, `workflow`, `hooks`).
 - Intégration continue GitHub Actions : build et tests à chaque push.
 
 ## Démarrage rapide
@@ -46,6 +47,27 @@ La sortie montre la décision (`▶`), le texte de l'agent, les outils utilisés
 
 > Astuce : `npm link -w @supacode/cli` installe la commande `supacode` globalement.
 
+### Workflows
+
+```bash
+supacode workflow list                 # workflows de .supacode/workflows
+supacode workflow run verifs --yes     # lance un workflow (--yes valide les étapes « approve »)
+supacode hooks install                 # lance les workflows « commit » et « push » via les hooks git
+```
+
+Le format est décrit dans [docs/architecture.md](docs/architecture.md#workflows).
+
+### L'IDE
+
+Prérequis : Rust 1.85 ou plus (édition 2024). Sous Windows, les Build Tools Visual Studio (MSVC). Sous Linux, les bibliothèques de GPUI (`libxkbcommon-dev`, `libwayland-dev`, `libvulkan-dev`, etc.).
+
+```bash
+cargo run -p supacode-app --release
+cargo test --workspace
+```
+
+L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic sur une conversation la reprend (`claude --resume`). Les workflows d'un projet se lancent avec ▶ dans la section Workflows.
+
 ## Configuration
 
 Place un fichier `.supacode/config.json` à la racine de ton projet. Il est fusionné avec la configuration par défaut : tu peux n'indiquer que ce qui change.
@@ -77,9 +99,10 @@ Place un fichier `.supacode/config.json` à la racine de ton projet. Il est fusi
 
 | Chemin | Rôle |
 | --- | --- |
-| `packages/core` | `@supacode/core` : types, classifieur, configuration, routeur, agents Claude/Codex, orchestrateur |
-| `packages/cli` | `@supacode/cli` : commande `supacode` (`route`, `run`) |
-| `ide/` | Script de récupération de VSCodium et patchs SupaCode |
+| `packages/core` | `@supacode/core` : types, classifieur, configuration, routeur, agents Claude/Codex, orchestrateur, moteur de workflows |
+| `packages/cli` | `@supacode/cli` : commande `supacode` (`route`, `run`, `workflow`, `hooks`) |
+| `crates/supacode-core` | Cœur en Rust : conversations Claude Code, classifieur et routeur, agents Claude/Codex, moteur de workflows |
+| `crates/supacode-app` | L'IDE natif (GPUI) : fenêtre, terminal intégré, aperçu du code, suivi des workflows |
 | `docs/` | Documentation ([architecture et feuille de route](docs/architecture.md)) |
 | `.github/workflows` | Intégration continue |
 

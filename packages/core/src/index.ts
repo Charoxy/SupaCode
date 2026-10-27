@@ -6,3 +6,8 @@ export * from "./orchestrator.js";
 export { spawnLines, commandExists, streamAgent, type SpawnItem, type SpawnLine, type SpawnOptions } from "./agents/process.js";
 export { ClaudeAgent, parseClaudeLine } from "./agents/claude.js";
 export { CodexAgent, parseCodexLine } from "./agents/codex.js";
+export * from "./workflows/types.js";
+export * from "./workflows/loader.js";
+export * from "./workflows/engine.js";
+export * from "./claude/sessions.js";
+export * from "./claude/env.js";
