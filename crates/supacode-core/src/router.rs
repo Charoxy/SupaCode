@@ -333,14 +333,23 @@ pub struct RouteDecision {
     pub classification: Classification,
 }
 
-/// Décide quel agent et quel modèle traitent la demande ; `agent`/`model` forcés passent en priorité.
+/// Décide quel agent et quel modèle traitent la demande.
+/// Un agent imposé (`agent`) garde le modèle choisi par l'orchestrateur pour cet agent ;
+/// seul un `model` explicite remplace ce choix.
 pub fn route(prompt: &str, config: &OrchestratorConfig, agent: Option<AgentId>, model: Option<&str>) -> RouteDecision {
     let classification = classify(prompt);
-    if let Some(agent) = agent {
-        return RouteDecision { agent, model: model.map(Into::into), reason: "agent forcé manuellement".into(), classification };
-    }
     let (kind, size) = (classification.kind, classification.size);
-    let (choice, mut reason) = if !config.enabled {
+    let matches = |r: &&RouteRule| r.kind.is_none_or(|k| k == kind) && r.size.is_none_or(|s| s == size);
+    let (choice, mut reason) = if let Some(agent) = agent {
+        // Première règle qui correspond à la tâche ET qui vise cet agent ; sinon repli ou agent fixe s'ils le visent.
+        if let Some(rule) = config.rules.iter().filter(|r| config.enabled && r.agent == agent).find(matches) {
+            (AgentChoice { agent, model: rule.model.clone() }, format!("{} / {} → {} imposé, modèle de la règle {}", kind.label(), size.label(), agent.label(), rule.name))
+        } else {
+            let base = if config.enabled { &config.fallback } else { &config.fixed };
+            let model = (base.agent == agent).then(|| base.model.clone()).flatten();
+            (AgentChoice { agent, model }, format!("{} / {} → {} imposé", kind.label(), size.label(), agent.label()))
+        }
+    } else if !config.enabled {
         (config.fixed.clone(), "orchestrateur désactivé → agent fixe".to_owned())
     } else if let Some(rule) = config.rules.iter().find(|r| r.kind.is_none_or(|k| k == kind) && r.size.is_none_or(|s| s == size)) {
         (AgentChoice { agent: rule.agent, model: rule.model.clone() }, format!("{} / {} → règle {}", kind.label(), size.label(), rule.name))
@@ -382,5 +391,12 @@ mod tests {
         assert_eq!((d.agent, d.model.as_deref()), (AgentId::Claude, Some("sonnet")));
         let d = route("corrige la typo", &config, Some(AgentId::Claude), Some("opus"));
         assert_eq!((d.agent, d.model.as_deref()), (AgentId::Claude, Some("opus")));
+        // Agent imposé sans modèle : l'orchestrateur choisit le modèle selon la tâche.
+        let d = route("refactorise toute l'architecture du projet", &config, Some(AgentId::Claude), None);
+        assert_eq!((d.agent, d.model.as_deref()), (AgentId::Claude, Some("opus")));
+        let d = route("pourquoi le build est lent ?", &config, Some(AgentId::Claude), None);
+        assert_eq!(d.model.as_deref(), Some("haiku"));
+        let d = route("corrige la typo", &config, Some(AgentId::Claude), None);
+        assert_eq!(d.model.as_deref(), Some("sonnet"), "aucune règle Claude pour une petite correction : repli");
     }
 }

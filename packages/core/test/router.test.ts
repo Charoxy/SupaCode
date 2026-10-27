@@ -18,7 +18,12 @@ describe("route", () => {
 
   it("respecte un agent forcé manuellement", () => {
     const d = route("corrige la typo", DEFAULT_CONFIG, { agent: "claude", model: "opus" });
-    expect(d).toMatchObject({ agent: "claude", model: "opus", reason: "agent forcé manuellement" });
+    expect(d).toMatchObject({ agent: "claude", model: "opus" });
+  });
+
+  it("laisse l'orchestrateur choisir le modèle d'un agent imposé", () => {
+    const d = route("refactorise toute l'architecture du projet", DEFAULT_CONFIG, { agent: "claude" });
+    expect(d).toMatchObject({ agent: "claude", model: "opus" });
   });
 
   it("utilise l'agent fixe quand l'orchestrateur est désactivé", () => {

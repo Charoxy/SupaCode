@@ -39,7 +39,7 @@ Format de <workflow> :
 }}
 Chaque étape a un "id" unique (minuscules, chiffres, tirets), un "name" court en français, et exactement UN de ces champs :
 - "run": "<commande shell>" pour une commande (lint, tests, build…) ;
-- "prompt": "<consigne>" pour un agent, avec "agent": "auto" | "claude" | "codex" et, si utile, "model": "haiku" | "sonnet" | "opus" (Claude seulement) ;
+- "prompt": "<consigne>" pour un agent, avec "agent": "auto" | "claude" | "codex" ("auto" sauf si la demande impose un agent). N'indique JAMAIS de "model" : l'orchestrateur choisit le modèle selon la tâche ;
 - "approve": "<question>" pour une validation humaine ;
 - "parallel": [<étapes>] pour lancer des étapes en même temps.
 Condition facultative "if": "always" ou "steps.<id>.success" / "steps.<id>.failed" / "steps.<id>.skipped" (l'id doit désigner une étape PRÉCÉDENTE). Sans condition, une étape ne s'exécute que si aucune étape précédente n'a échoué ; une étape "if": "steps.X.failed" rattrape l'échec de X.

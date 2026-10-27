@@ -10,6 +10,7 @@ use gpui_kit::*;
 use supacode_core::edit::{self, StepPath};
 use supacode_core::engine::{StepKind, flatten};
 use supacode_core::generate::{self, validate};
+use supacode_core::router::{self, AgentId, OrchestratorConfig};
 use supacode_core::workflows::{Step, Trigger, Workflow, save_workflow, write_workflow};
 
 use crate::highlight::{self, code_text};
@@ -53,15 +54,16 @@ pub struct Editor {
     workflow_fields: WorkflowFields,
     show_json: bool,
     save_error: Option<String>,
+    /// Règles de l'orchestrateur du projet, pour montrer quel modèle sera choisi.
+    config: OrchestratorConfig,
 }
-
-const MODELS: [Option<&str>; 4] = [None, Some("haiku"), Some("sonnet"), Some("opus")];
 
 impl Editor {
     pub fn new(project: PathBuf, project_name: String, id: Option<String>, workflow: Workflow, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workflow_fields = Self::workflow_fields(&workflow, window, cx);
         let dirty = id.is_none();
-        Self { project, project_name, id, workflow, dirty, selected: None, step_fields: None, workflow_fields, show_json: false, save_error: None }
+        let config = router::load_config(&project).unwrap_or_default();
+        Self { project, project_name, id, workflow, dirty, selected: None, step_fields: None, workflow_fields, show_json: false, save_error: None, config }
     }
 
     fn workflow_fields(workflow: &Workflow, window: &mut Window, cx: &mut Context<Self>) -> WorkflowFields {
@@ -225,17 +227,15 @@ impl Editor {
         let Some(path) = self.selected else { return };
         if let Some(step) = self.step_mut(path) {
             step.agent = Some(agent.to_owned());
-            if agent == "codex" {
-                step.model = None;
-            }
         }
         self.touch(cx);
     }
 
-    fn set_model(&mut self, model: Option<&str>, cx: &mut Context<Self>) {
+    /// Retire un modèle fixé dans le fichier : l'orchestrateur reprend la main.
+    fn clear_model(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.selected else { return };
         if let Some(step) = self.step_mut(path) {
-            step.model = model.map(str::to_owned);
+            step.model = None;
         }
         self.touch(cx);
     }
@@ -546,12 +546,26 @@ impl Editor {
             let (kind_label, detail) = match step.kind() {
                 StepKind::Run => ("COMMANDE", step.run.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "commande à définir".into())),
                 StepKind::Agent => {
-                    let agent = match step.agent.as_deref() {
-                        Some("claude") => "Claude",
-                        Some("codex") => "Codex",
-                        _ => "orchestrateur",
+                    let forced = match step.agent.as_deref() {
+                        Some("claude") => Some(AgentId::Claude),
+                        Some("codex") => Some(AgentId::Codex),
+                        _ => None,
                     };
-                    ("AGENT", format!("{agent}{}", step.model.as_ref().map(|m| format!(" · {m}")).unwrap_or_default()))
+                    let prompt = step.prompt.as_deref().unwrap_or_default();
+                    let detail = if prompt.trim().is_empty() {
+                        "instructions à écrire".to_owned()
+                    } else {
+                        let d = router::route(prompt, &self.config, forced, step.model.as_deref());
+                        format!(
+                            "{} · {}{} → {}{}",
+                            d.classification.kind.label(),
+                            d.classification.size.label(),
+                            if forced.is_some() { " · agent imposé" } else { "" },
+                            d.agent.label(),
+                            d.model.map(|m| format!(" · {m}")).unwrap_or_default()
+                        )
+                    };
+                    ("AGENT", detail)
                 }
                 StepKind::Approve => ("VALIDATION", step.approve.clone().unwrap_or_default()),
                 StepKind::Parallel => ("PARALLÈLE", String::new()),
@@ -608,14 +622,8 @@ impl Editor {
                         let agents = [("auto", "Auto"), ("claude", "Claude"), ("codex", "Codex")].map(|(value, label)| {
                             chip(format!("agent-{value}"), label, agent == value).on_click(cx.listener(move |this, _, _, cx| this.set_agent(value, cx)))
                         });
-                        body = body.child(field("Agent", div().flex().gap_1p5().children(agents)).child(hint("Auto : l'orchestrateur choisit selon la demande.")));
-                        if agent != "codex" {
-                            let models = MODELS.map(|model| {
-                                chip(format!("model-{}", model.unwrap_or("defaut")), model.unwrap_or("défaut"), step.model.as_deref() == model)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.set_model(model, cx)))
-                            });
-                            body = body.child(field("Modèle", div().flex().gap_1p5().children(models)));
-                        }
+                        body = body.child(field("Agent", div().flex().gap_1p5().children(agents)).child(hint("Auto : l'orchestrateur choisit aussi l'agent.")));
+                        body = body.child(self.render_routing(step, cx));
                     }
                     StepKind::Parallel => {
                         body = body.child(hint("Les branches s'exécutent en même temps ; le groupe échoue si l'une d'elles échoue. Sélectionne le groupe puis un bloc de la bibliothèque pour ajouter une branche."));
@@ -701,6 +709,69 @@ impl Editor {
             )
             .child(body)
             .children(actions)
+    }
+
+    /// Modèle : toujours choisi par l'orchestrateur selon la tâche décrite dans les instructions.
+    fn render_routing(&self, step: &Step, cx: &mut Context<Self>) -> Div {
+        let forced = match step.agent.as_deref() {
+            Some("claude") => Some(AgentId::Claude),
+            Some("codex") => Some(AgentId::Codex),
+            _ => None,
+        };
+        let prompt = step.prompt.as_deref().unwrap_or_default();
+        // Modèle fixé dans le fichier (ancien workflow) : signalé, avec de quoi le retirer.
+        if let Some(model) = step.model.clone() {
+            return field(
+                "Modèle",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(div().text_size(px(12.0)).text_color(T.warn).child(format!("Fixé à « {model} » dans le fichier.")))
+                    .child(
+                        div()
+                            .id("clear-model")
+                            .self_start()
+                            .h(px(24.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .border_1()
+                            .border_color(T.border)
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover))
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_model(cx)))
+                            .child("Laisser l'orchestrateur choisir"),
+                    ),
+            );
+        }
+        let content = if prompt.trim().is_empty() {
+            div().text_size(px(12.0)).text_color(T.text3).child("Écris les instructions : l'orchestrateur choisira le modèle selon la tâche.")
+        } else {
+            let decision = router::route(prompt, &self.config, forced, None);
+            let (fg, bg) = match decision.agent {
+                AgentId::Codex => (T.codex, T.codex_soft),
+                AgentId::Claude => (T.claude, T.claude_soft),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .self_start()
+                        .px_1p5()
+                        .rounded(px(4.0))
+                        .bg(bg)
+                        .text_color(fg)
+                        .text_size(px(12.0))
+                        .child(format!("{}{}", decision.agent.label(), decision.model.map(|m| format!(" · {m}")).unwrap_or_else(|| " · modèle par défaut".into()))),
+                )
+                .child(hint(&decision.reason))
+        };
+        field("Modèle choisi par l'orchestrateur", content)
     }
 
     /// Condition d'exécution : par défaut, toujours, ou selon le résultat d'une étape précédente.

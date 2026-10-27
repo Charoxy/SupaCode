@@ -520,11 +520,11 @@ fn step_block(step: &Step, compact: bool) -> Div {
         } else if step.approve.is_some() {
             (badge(T.selected).child(icon(icons::CHECK).size(px(12.0)).text_color(T.accent)), None)
         } else {
-            let model = step.model.as_ref().map(|m| format!(" · {m}")).unwrap_or_default();
+            let model = step.model.as_ref().map(|m| format!(" · {m}")).unwrap_or_else(|| " · modèle auto".into());
             match step.agent.as_deref() {
                 Some("codex") => (badge(T.codex_soft).child(icon(icons::CODEX).size(px(12.0)).text_color(T.codex)), Some(format!("Codex{model}"))),
                 Some("claude") => (badge(T.claude_soft).child(icon(icons::CLAUDE).size(px(12.0)).text_color(T.claude)), Some(format!("Claude{model}"))),
-                _ => (badge(T.selected).child(icon(icons::BOLT).size(px(12.0)).text_color(T.accent)), Some(format!("orchestrateur{model}"))),
+                _ => (badge(T.selected).child(icon(icons::BOLT).size(px(12.0)).text_color(T.accent)), Some("orchestrateur".to_owned())),
             }
         };
         let mono = step.run.is_some();

@@ -12,22 +12,22 @@ export interface RouteOverride {
 export function route(prompt: string, config: SupaCodeConfig, override?: RouteOverride): RouteDecision {
   const classification = classify(prompt);
 
-  if (override?.agent) {
-    return {
-      agent: override.agent,
-      model: override.model,
-      reason: "agent forcé manuellement",
-      classification,
-    };
-  }
-
   const orchestrator = config.orchestrator;
+  const { kind, size } = classification;
+  const matches = (r: { kind?: string; size?: string }) => (!r.kind || r.kind === kind) && (!r.size || r.size === size);
   let decision: RouteDecision;
-  if (!orchestrator.enabled) {
+  if (override?.agent) {
+    // Agent imposé : le modèle reste choisi par l'orchestrateur (règle qui vise cet agent, sinon repli).
+    const agent = override.agent;
+    const rule = orchestrator.enabled ? orchestrator.rules.find((r) => r.agent === agent && matches(r)) : undefined;
+    const base = orchestrator.enabled ? orchestrator.fallback : orchestrator.fixed;
+    const model = rule ? rule.model : base.agent === agent ? base.model : undefined;
+    const reason = rule ? `${kind} / ${size} → ${agent} imposé, modèle de la règle ${rule.name}` : `${kind} / ${size} → ${agent} imposé`;
+    decision = model !== undefined ? { agent, model, reason, classification } : { agent, reason, classification };
+  } else if (!orchestrator.enabled) {
     decision = { ...orchestrator.fixed, reason: "orchestrateur désactivé → agent fixe", classification };
   } else {
-    const { kind, size } = classification;
-    const rule = orchestrator.rules.find((r) => (!r.kind || r.kind === kind) && (!r.size || r.size === size));
+    const rule = orchestrator.rules.find(matches);
     decision = rule
       ? { agent: rule.agent, model: rule.model, reason: `${kind} / ${size} → règle ${rule.name}`, classification }
       : { ...orchestrator.fallback, reason: `${kind} / ${size} → repli`, classification };
