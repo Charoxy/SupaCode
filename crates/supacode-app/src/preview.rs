@@ -1,6 +1,7 @@
 //! Aperçu du code : surveille le projet de la conversation active et calcule,
 //! pour chaque fichier modifié, le diff par rapport au dernier commit.
 
+use crate::highlight;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -25,7 +26,10 @@ pub struct DiffLine {
     pub kind: LineKind,
     /// Numéro dans la version actuelle (absent pour une ligne supprimée).
     pub number: Option<usize>,
+    /// Texte affiché (tabulations remplacées).
     pub text: String,
+    /// Coloration syntaxique de `text`.
+    pub spans: highlight::Spans,
 }
 
 /// Un fichier modifié pendant la conversation.
@@ -101,7 +105,11 @@ pub fn diff_file(root: &Path, path: &Path) -> Option<ChangedFile> {
             }
         };
         let number = change.new_index().map(|i| i + 1);
-        lines.push(DiffLine { kind, number, text: change.value().trim_end_matches(['\n', '\r']).to_owned() });
+        lines.push(DiffLine { kind, number, text: highlight::expand_tabs(change.value().trim_end_matches(['\n', '\r'])), spans: Vec::new() });
+    }
+    let spans = highlight::highlight(&relative, &lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>());
+    for (line, spans) in lines.iter_mut().zip(spans) {
+        line.spans = spans;
     }
     Some(ChangedFile { path: path.to_path_buf(), relative, lines, added, removed, is_new })
 }

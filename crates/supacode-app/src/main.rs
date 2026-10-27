@@ -3,7 +3,9 @@
 // Pas de console en plus de la fenêtre sous Windows (build optimisé).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod highlight;
 mod icons;
+mod palette;
 mod preview;
 mod terminal;
 mod theme;

@@ -12,7 +12,9 @@ use supacode_core::engine::RunStatus;
 use supacode_core::time::relative;
 use supacode_core::workflows::{WorkflowFile, load_workflows};
 
+use crate::highlight::{self, Spans, code_text};
 use crate::icons::{self, icon};
+use crate::palette::{self, Palette, PaletteEvent};
 use crate::preview::{self, ChangedFile, LineKind};
 use crate::terminal::{Command, TerminalEvent, TerminalView};
 use crate::theme::{self, DARK as T};
@@ -50,6 +52,15 @@ enum RightPanel {
     Code,
     /// Suivi d'une exécution de workflow.
     Run(usize),
+    /// Fichier ouvert depuis la palette.
+    File,
+}
+
+/// Fichier affiché en lecture dans le panneau de droite.
+struct OpenedFile {
+    relative: String,
+    lines: Vec<String>,
+    spans: Vec<Spans>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -79,6 +90,10 @@ pub struct Workspace {
     codex_installed: bool,
     pulse: bool,
     window_title: String,
+    palette: Option<Entity<Palette>>,
+    opened: Option<OpenedFile>,
+    /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
+    focus: FocusHandle,
     watcher: Option<notify::RecommendedWatcher>,
     _tasks: Vec<Task<()>>,
 }
@@ -106,10 +121,14 @@ impl Workspace {
             codex_installed: which("codex"),
             pulse: true,
             window_title: "SupaCode".into(),
+            palette: None,
+            opened: None,
+            focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
         };
         this.refresh_projects(cx);
+        window.focus(&this.focus, cx);
 
         // Animation « en cours » (jeton `pulse` : 700 ms) et actualisation de la liste.
         let ticker = cx.spawn_in(window, async move |this, cx| {
@@ -137,6 +156,34 @@ impl Workspace {
             }
         });
         this._tasks.push(ticker);
+
+        // Débogage : `SUPACODE_PALETTE=<recherche>` ouvre la palette au démarrage (captures d'écran de test).
+        #[cfg(debug_assertions)]
+        if let Ok(query) = std::env::var("SUPACODE_PALETTE") {
+            let task = cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.toggle_palette(window, cx);
+                    if let Some(palette) = this.palette.clone() {
+                        palette.update(cx, |palette, cx| palette.set_query(&query, window, cx));
+                    }
+                });
+            });
+            this._tasks.push(task);
+        }
+        // Débogage : `SUPACODE_OPEN=<chemin relatif>` ouvre ce fichier du projet courant.
+        #[cfg(debug_assertions)]
+        if let Ok(relative) = std::env::var("SUPACODE_OPEN") {
+            let task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(project) = this.current_project() {
+                        this.open_file(&project.path, relative, cx);
+                    }
+                });
+            });
+            this._tasks.push(task);
+        }
         this
     }
 
@@ -334,6 +381,7 @@ impl Workspace {
                     self.activate(next, window, cx);
                 } else {
                     self.watcher = None;
+                    window.focus(&self.focus, cx);
                 }
             }
             cx.notify();
@@ -420,6 +468,102 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.refocus(window, cx);
+            cx.notify();
+            return;
+        }
+        let mut commands = vec![
+            palette::Item::Command { label: "Nouvelle conversation".into(), hint: None, command: palette::Command::NewConversation },
+            palette::Item::Command { label: "Ajouter un projet".into(), hint: None, command: palette::Command::AddProject },
+        ];
+        if let (Some(project), Ok(workflows)) = (self.current_project(), &self.workflows) {
+            for file in workflows {
+                commands.push(palette::Item::Command {
+                    label: format!("Workflow : lancer « {} »", file.workflow.name),
+                    hint: None,
+                    command: palette::Command::RunWorkflow(project.path.clone(), file.clone()),
+                });
+            }
+        }
+        let root = self.current_project().map(|p| p.path);
+        let projects = self.projects.clone();
+        let palette = cx.new(|cx| Palette::new(projects, root, commands, window, cx));
+        cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
+            this.palette = None;
+            if let PaletteEvent::Pick(item) = event {
+                this.pick(item.clone(), window, cx);
+            } else {
+                this.refocus(window, cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    fn pick(&mut self, item: palette::Item, window: &mut Window, cx: &mut Context<Self>) {
+        match item {
+            palette::Item::Conversation(project, conversation) => {
+                let key = project_key(&project);
+                if self.expanded.insert(key) {
+                    self.load_conversations(project.clone(), cx);
+                }
+                self.open_conversation(project, Some(conversation), None, window, cx);
+            }
+            palette::Item::File { root, relative } => {
+                self.open_file(&root, relative, cx);
+                self.refocus(window, cx);
+            }
+            palette::Item::Project(project) => {
+                let key = project_key(&project);
+                self.selected_project = Some(key.clone());
+                if self.expanded.insert(key) {
+                    self.load_conversations(project, cx);
+                }
+                if self.active.is_none() {
+                    self.load_workflows(cx);
+                }
+                self.refocus(window, cx);
+            }
+            palette::Item::Command { command, .. } => match command {
+                palette::Command::NewConversation => self.new_conversation(None, window, cx),
+                palette::Command::AddProject => self.add_project(cx),
+                palette::Command::RunWorkflow(path, file) => {
+                    self.run_workflow(path, file, cx);
+                    self.refocus(window, cx);
+                }
+            },
+        }
+    }
+
+    /// Rend le clavier à la conversation active.
+    fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = match self.active_tab() {
+            Some(tab) => tab.terminal.read(cx).focus_handle().clone(),
+            None => self.focus.clone(),
+        };
+        window.focus(&focus, cx);
+    }
+
+    fn open_file(&mut self, root: &Path, relative: String, cx: &mut Context<Self>) {
+        let path = root.join(&relative);
+        let lines = match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > 2_000_000 => vec!["(fichier trop volumineux pour l'aperçu)".to_owned()],
+            _ => match std::fs::read(&path) {
+                Ok(bytes) if bytes.contains(&0) => vec!["(fichier binaire)".to_owned()],
+                Ok(bytes) => String::from_utf8_lossy(&bytes).lines().map(highlight::expand_tabs).collect(),
+                Err(err) => vec![format!("(lecture impossible : {err})")],
+            },
+        };
+        let spans = highlight::highlight(&relative, &lines);
+        self.opened = Some(OpenedFile { relative, lines, spans });
+        self.right = RightPanel::File;
+        cx.notify();
+    }
+
     fn accept_selected(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab_mut() {
             if tab.selected_file < tab.changed.len() {
@@ -438,8 +582,31 @@ impl Render for Workspace {
             window.set_window_title(&title);
             self.window_title = title;
         }
+        let overlay = self.palette.clone().map(|palette| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x0607099e))
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(96.0))
+                .child(palette)
+        });
         div()
             .size_full()
+            .relative()
+            .track_focus(&self.focus)
+            // En phase de capture : passe avant le terminal, qui enverrait sinon Ctrl+K à `claude`.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let k = &event.keystroke;
+                if k.modifiers.control && !k.modifiers.alt && (k.key == "k" || k.key == "p") {
+                    this.toggle_palette(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .flex_col()
             .bg(T.app)
@@ -457,6 +624,7 @@ impl Render for Workspace {
                     .children(self.render_right(cx)),
             )
             .child(self.render_status(cx))
+            .children(overlay)
     }
 }
 
@@ -987,13 +1155,41 @@ impl Workspace {
                 return Some(panel.child(self.render_right_tabs(None, cx)).child(view));
             }
         }
+        if self.right == RightPanel::File {
+            if let Some(opened) = &self.opened {
+                let lines = opened.lines.iter().enumerate().map(|(i, line)| {
+                    div()
+                        .flex()
+                        .h(px(20.0))
+                        .child(div().w(px(48.0)).flex_shrink_0().pr_3().flex().justify_end().text_color(T.text3).child((i + 1).to_string()))
+                        .child(div().whitespace_nowrap().child(code_text(line, opened.spans.get(i).unwrap_or(&Vec::new()))))
+                });
+                let toolbar = div()
+                    .h(px(36.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(T.border)
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.0)).text_color(T.text2).font_family(theme::MONO_FONT).child(opened.relative.replace('/', " › ")))
+                    .child(div().text_size(px(12.0)).text_color(T.text3).child(format!("{} lignes", opened.lines.len())));
+                return Some(
+                    panel
+                        .child(self.render_right_tabs(None, cx))
+                        .child(toolbar)
+                        .child(div().id("opened-file").flex_1().min_h_0().overflow_scroll().py_2().font_family(theme::MONO_FONT).text_size(px(13.0)).line_height(px(20.0)).children(lines)),
+                );
+            }
+        }
         let tab = self.active_tab()?;
         let changed = tab.changed.clone();
         let selected = tab.selected_file.min(changed.len().saturating_sub(1));
 
         let Some(file) = changed.get(selected).cloned() else {
             return Some(
-                panel.when(!self.runs.is_empty(), |d| d.child(self.render_right_tabs(None, cx))).child(
+                panel.when(!self.runs.is_empty() || self.opened.is_some(), |d| d.child(self.render_right_tabs(None, cx))).child(
                     div().size_full().flex().flex_col().items_center().justify_center().gap_2().p_8().child(div().font_weight(FontWeight::MEDIUM).child("Aperçu du code")).child(
                         div()
                             .text_color(T.text3)
@@ -1099,7 +1295,7 @@ impl Workspace {
                         .child(line.number.map(|n| n.to_string()).unwrap_or_default()),
                 )
                 .child(div().w(px(18.0)).flex_shrink_0().text_center().text_color(sign_color).child(sign))
-                .child(div().whitespace_nowrap().child(if line.text.is_empty() { " ".to_owned() } else { line.text.replace('\t', "    ") }))
+                .child(div().whitespace_nowrap().child(code_text(&line.text, &line.spans)))
         });
 
         let files_list = div()
@@ -1202,6 +1398,42 @@ impl Workspace {
                         cx.notify();
                     }))
                     .child("Code"),
+            );
+        }
+        if let Some(opened) = &self.opened {
+            let is_selected = self.right == RightPanel::File;
+            let name = Path::new(&opened.relative).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            tabs = tabs.child(
+                div()
+                    .id("opened-tab")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_3()
+                    .border_r_1()
+                    .border_color(T.border)
+                    .cursor_pointer()
+                    .when(is_selected, |d| d.bg(T.surface).border_t_2().border_color(T.accent))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.right = RightPanel::File;
+                        cx.notify();
+                    }))
+                    .child(div().text_color(if is_selected { T.text } else { T.text3 }).child(name))
+                    .child(
+                        div()
+                            .id("opened-close")
+                            .rounded(px(4.0))
+                            .hover(|d| d.bg(T.hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.opened = None;
+                                if this.right == RightPanel::File {
+                                    this.right = RightPanel::Code;
+                                }
+                                cx.notify();
+                            }))
+                            .child(icon(icons::CLOSE).size(px(11.0)).text_color(T.text3)),
+                    ),
             );
         }
         for run in &self.runs {
