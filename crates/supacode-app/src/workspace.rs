@@ -47,6 +47,39 @@ struct Tab {
     last_output: Option<Instant>,
 }
 
+/// Onglet de la barre latérale.
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarTab {
+    Projects,
+    Workflows,
+}
+
+/// Séparateur glissé entre deux panneaux.
+#[derive(Clone, Copy)]
+enum Split {
+    Sidebar,
+    Right,
+}
+
+impl Render for Split {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Largeurs des panneaux, gardées d'une session à l'autre.
+#[derive(Clone, Copy)]
+struct Layout {
+    sidebar: f32,
+    right: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self { sidebar: 260.0, right: 576.0 }
+    }
+}
+
 /// Contenu du panneau de droite.
 #[derive(Clone, Copy, PartialEq)]
 enum RightPanel {
@@ -86,7 +119,14 @@ pub struct Workspace {
     active: Option<usize>,
     next_tab_id: usize,
     workflows: Result<Vec<WorkflowFile>, String>,
-    workflows_open: bool,
+    sidebar_tab: SidebarTab,
+    /// Barre latérale affichée (un clic sur l'icône de l'onglet ouvert la replie).
+    sidebar_open: bool,
+    /// Projet choisi dans l'onglet Workflows (sinon : le projet courant).
+    workflow_project: Option<String>,
+    picking_project: bool,
+    layout: Layout,
+    layout_dirty: bool,
     runs: Vec<WorkflowRun>,
     next_run_id: usize,
     right: RightPanel,
@@ -125,7 +165,12 @@ impl Workspace {
             active: None,
             next_tab_id: 0,
             workflows: Ok(Vec::new()),
-            workflows_open: true,
+            sidebar_tab: SidebarTab::Projects,
+            sidebar_open: true,
+            workflow_project: None,
+            picking_project: false,
+            layout: load_layout(),
+            layout_dirty: false,
             runs: Vec::new(),
             next_run_id: 0,
             right: RightPanel::Code,
@@ -315,12 +360,12 @@ impl Workspace {
 
     /// Workflows du projet courant (onglet actif, sinon projet sélectionné).
     fn load_workflows(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.current_project() else {
+        self.branch = self.current_project().and_then(|p| preview::git_branch(&p.path));
+        let Some(project) = self.workflows_project() else {
             self.workflows = Ok(Vec::new());
             return;
         };
         self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
-        self.branch = preview::git_branch(&project.path);
         self.watch_saves(project.path, cx);
         cx.notify();
     }
@@ -389,6 +434,11 @@ impl Workspace {
         self.projects.iter().find(|p| &project_key(p) == key).cloned()
     }
 
+    /// Projet dont l'onglet Workflows montre les workflows.
+    fn workflows_project(&self) -> Option<Project> {
+        self.workflow_project.as_ref().and_then(|key| self.projects.iter().find(|p| &project_key(p) == key).cloned()).or_else(|| self.current_project())
+    }
+
     fn active_tab(&self) -> Option<&Tab> {
         self.active.and_then(|id| self.tabs.iter().find(|t| t.id == id))
     }
@@ -407,6 +457,7 @@ impl Workspace {
     fn toggle_project(&mut self, project: Project, cx: &mut Context<Self>) {
         let key = project_key(&project);
         self.selected_project = Some(key.clone());
+        self.workflow_project = None;
         if !self.expanded.remove(&key) {
             self.expanded.insert(key);
             self.load_conversations(project, cx);
@@ -480,6 +531,7 @@ impl Workspace {
 
     fn activate(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = Some(id);
+        self.workflow_project = None;
         self.right = RightPanel::Code;
         self.confirm_revert = false;
         if let Some(tab) = self.active_tab() {
@@ -620,7 +672,7 @@ impl Workspace {
             palette::Item::Command { label: "Nouveau workflow…".into(), hint: None, command: palette::Command::NewWorkflow },
             palette::Item::Command { label: "Ajouter un projet".into(), hint: None, command: palette::Command::AddProject },
         ];
-        if let (Some(project), Ok(workflows)) = (self.current_project(), &self.workflows) {
+        if let (Some(project), Ok(workflows)) = (self.workflows_project(), &self.workflows) {
             for file in workflows {
                 commands.push(palette::Item::Command {
                     label: format!("Workflow : lancer « {} »", file.workflow.name),
@@ -693,7 +745,7 @@ impl Workspace {
 
     /// Fenêtre « Nouveau workflow » pour le projet courant.
     fn open_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.current_project() else {
+        let Some(project) = self.workflows_project() else {
             self.add_project(cx);
             return;
         };
@@ -701,15 +753,15 @@ impl Workspace {
         cx.subscribe_in(&creator, window, |this, _, event: &CreatorEvent, window, cx| {
             this.creator = None;
             if let CreatorEvent::Edit(workflow) = event {
-                if let Some(project) = this.current_project() {
+                if let Some(project) = this.workflows_project() {
                     this.open_editor(project.path, project.name, None, workflow.clone(), window, cx);
                 }
                 return;
             }
             if let CreatorEvent::Created(id) = event {
-                this.workflows_open = true;
+                this.sidebar_tab = SidebarTab::Workflows;
                 this.load_workflows(cx);
-                if let Some(project) = this.current_project() {
+                if let Some(project) = this.workflows_project() {
                     this.open_file(&project.path, format!(".supacode/workflows/{id}.json"), cx);
                 }
             }
@@ -807,6 +859,13 @@ impl Render for Workspace {
         let creator = self.creator.clone().map(|creator| {
             div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(84.0)).child(creator)
         });
+        let activity = self.render_activity_bar(cx);
+        let sidebar = self.sidebar_open.then(|| self.render_sidebar(window, cx).into_any_element());
+        let (center, right) = if self.editor.is_none() {
+            (Some(self.render_center(window, cx).into_any_element()), self.render_right(cx).map(|r| r.into_any_element()))
+        } else {
+            (None, None)
+        };
         div()
             .size_full()
             .relative()
@@ -817,6 +876,24 @@ impl Render for Workspace {
                 if k.modifiers.control && !k.modifiers.alt && (k.key == "k" || k.key == "p") {
                     this.toggle_palette(window, cx);
                     cx.stop_propagation();
+                }
+            }))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<Split>, _, cx| {
+                let x = f32::from(event.event.position.x - event.bounds.origin.x);
+                let width = f32::from(event.bounds.size.width);
+                match *event.drag(cx) {
+                    Split::Sidebar => this.layout.sidebar = (x - ACTIVITY_BAR).clamp(MIN_SIDEBAR, (width - ACTIVITY_BAR - this.layout.right - MIN_CENTER).clamp(MIN_SIDEBAR, MAX_SIDEBAR)),
+                    Split::Right => {
+                        let sidebar = if this.sidebar_open { this.layout.sidebar } else { 0.0 };
+                        this.layout.right = (width - x).clamp(MIN_RIGHT, (width - ACTIVITY_BAR - sidebar - MIN_CENTER).max(MIN_RIGHT))
+                    }
+                }
+                this.layout_dirty = true;
+                cx.notify();
+            }))
+            .capture_any_mouse_up(cx.listener(|this, _, _, _| {
+                if std::mem::take(&mut this.layout_dirty) {
+                    save_layout(this.layout);
                 }
             }))
             .flex()
@@ -831,9 +908,11 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_sidebar(window, cx))
+                    .child(activity)
+                    .when_some(sidebar, |d, sidebar| d.child(sidebar).child(splitter("split-sidebar", Split::Sidebar, T.panel)))
                     .when_some(self.editor.clone(), |d, editor| d.child(div().flex_1().min_w_0().child(editor)))
-                    .when(self.editor.is_none(), |d| d.child(self.render_center(window, cx)).children(self.render_right(cx))),
+                    .children(center)
+                    .when_some(right, |d, right| d.child(splitter("split-right", Split::Right, T.surface)).child(right)),
             )
             .child(self.render_status(cx))
             .children(overlay)
@@ -978,53 +1057,12 @@ impl Workspace {
             list = list.child(items);
         }
 
-        div()
-            .w(px(260.0))
-            .flex_shrink_0()
+        let projects_tab = div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .bg(T.panel)
-            .border_r_1()
-            .border_color(T.border)
-            .child(
-                div()
-                    .px_3()
-                    .pt_3()
-                    .pb_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .h(px(24.0))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(icons::logo(20.0))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.0)).child("SupaCode")),
-                    )
-                    .child(
-                        div()
-                            .id("new-conversation")
-                            .h(px(30.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap_1p5()
-                            .rounded(px(6.0))
-                            .bg(T.accent_bg)
-                            .text_color(T.accent_on)
-                            .font_weight(FontWeight::MEDIUM)
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.9))
-                            .on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx)))
-                            .child(icon(icons::PLUS).size(px(14.0)))
-                            .child("Nouvelle conversation"),
-                    ),
-            )
-            .child(section_label("Projets").px_3().pt_2().pb_1())
-            .child(list)
-            .child(self.render_workflows(cx))
+            .child(list.pt_1())
             .child(
                 div().border_t_1().border_color(T.border).p_2().when(self.adding, |d| d.child(self.render_add_menu(cx))).child(
                     div()
@@ -1046,7 +1084,105 @@ impl Workspace {
                         .child(icon(icons::PLUS).size(px(14.0)))
                         .child("Ajouter un projet"),
                 ),
+            );
+        let body = match self.sidebar_tab {
+            SidebarTab::Projects => projects_tab.into_any_element(),
+            SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
+        };
+        let (title, count) = match self.sidebar_tab {
+            SidebarTab::Projects => ("Projets", self.projects.len()),
+            SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
+        };
+
+        div()
+            .w(px(self.layout.sidebar))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .bg(T.panel)
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(section_label(title).flex_1())
+                            .when(count > 0, |d| d.child(div().text_size(px(11.0)).text_color(T.text3).child(count.to_string()))),
+                    )
+                    .child(
+                        div()
+                            .id("new-conversation")
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1p5()
+                            .rounded(px(6.0))
+                            .bg(T.accent_bg)
+                            .text_color(T.accent_on)
+                            .font_weight(FontWeight::MEDIUM)
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.9))
+                            .on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx)))
+                            .child(icon(icons::PLUS).size(px(14.0)))
+                            .child("Nouvelle conversation"),
+                    ),
             )
+            .child(body)
+    }
+
+    /// Barre d'icônes tout à gauche : choisit l'onglet de la barre latérale.
+    fn render_activity_bar(&self, cx: &mut Context<Self>) -> Div {
+        let running = self.runs.iter().any(|r| r.running());
+        div()
+            .w(px(ACTIVITY_BAR))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .pt(px(10.0))
+            .bg(T.app)
+            .border_r_1()
+            .border_color(T.border)
+            .child(div().mb_2().child(icons::logo(24.0)))
+            .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
+            .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
+    }
+
+    fn activity_button(&self, id: &'static str, svg: &'static str, tab: SidebarTab, badge: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let selected = self.sidebar_open && self.sidebar_tab == tab;
+        div()
+            .id(id)
+            .relative()
+            .size(px(36.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_color(if selected { T.text } else { T.text3 })
+            .when(selected, |d| d.bg(T.hover))
+            .hover(|d| d.text_color(T.text))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // L'onglet déjà ouvert : replie la barre latérale.
+                this.sidebar_open = !(this.sidebar_open && this.sidebar_tab == tab);
+                this.sidebar_tab = tab;
+                this.adding = false;
+                this.picking_project = false;
+                cx.notify();
+            }))
+            .when(selected, |d| d.child(div().absolute().left(px(-6.0)).top(px(8.0)).w(px(2.0)).h(px(20.0)).rounded(px(1.0)).bg(T.accent)))
+            .child(icon(svg).size(px(18.0)))
+            .when(badge, |d| d.child(div().absolute().top(px(7.0)).right(px(7.0)).size(px(7.0)).rounded_full().bg(T.accent).opacity(if self.pulse { 1.0 } else { 0.4 })))
     }
 
     /// Choix du projet à ajouter : un dossier, ou un projet déjà utilisé avec Claude Code.
@@ -1100,11 +1236,11 @@ impl Workspace {
     }
 
     fn render_workflows(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.workflows.as_ref().map(|w| w.len()).unwrap_or(0);
-        let mut body = div().id("workflow-list").flex().flex_col().gap(px(2.0)).mt(px(2.0)).max_h(px(220.0)).overflow_y_scroll();
+        let mut body = div().id("workflow-list").flex_1().min_h_0().overflow_y_scroll().px_2().pt_1().flex().flex_col().gap(px(2.0));
+        let current = self.workflows_project();
         match &self.workflows {
             Err(error) => body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.err).child(format!("✖ {error}"))),
-            Ok(_) if self.current_project().is_none() => {
+            Ok(_) if current.is_none() => {
                 body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.text3).child("Ajoute un projet pour voir ses workflows."));
             }
             Ok(list) if list.is_empty() => {
@@ -1129,7 +1265,7 @@ impl Workspace {
                 );
             }
             Ok(list) => {
-                let project = self.current_project().map(|p| p.path);
+                let project = current.as_ref().map(|p| p.path.clone());
                 for (i, file) in list.iter().enumerate() {
                     let tags = file.workflow.triggers().iter().map(|t| tag(t.label())).collect::<Vec<_>>();
                     let run = project.as_ref().and_then(|p| self.run_for(p, &file.id));
@@ -1233,47 +1369,85 @@ impl Workspace {
                 }
             }
         }
-        div()
-            .border_t_1()
-            .border_color(T.border)
-            .p_2()
-            .max_h(px(260.0))
-            .child(
-                div()
-                    .id("workflows-toggle")
-                    .h(px(26.0))
-                    .px_1p5()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(T.hover))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workflows_open = !this.workflows_open;
-                        cx.notify();
-                    }))
-                    .child(icon(if self.workflows_open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }).size(px(12.0)).text_color(T.text3))
-                    .child(section_label("Workflows").flex_1())
-                    .child(div().text_size(px(11.0)).text_color(T.text3).child(count.to_string()))
-                    .child(
-                        div()
-                            .id("new-workflow")
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.0))
-                            .text_color(T.text3)
-                            .hover(|d| d.bg(T.raised).text_color(T.text))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_creator(window, cx);
-                            }))
-                            .child(icon(icons::PLUS).size(px(12.0))),
-                    ),
+        let picker = (self.picking_project && self.projects.len() > 1).then(|| {
+            let current = current.as_ref().map(project_key);
+            div().mx_2().mb_1().p_1().rounded(px(6.0)).border_1().border_color(T.border).bg(T.app).flex().flex_col().gap(px(2.0)).children(
+                self.projects.iter().enumerate().map(|(i, project)| {
+                    let key = project_key(project);
+                    let selected = current.as_ref() == Some(&key);
+                    div()
+                        .id(("wf-project-choice", i))
+                        .h(px(28.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(T.hover))
+                        .when(selected, |d| d.bg(T.hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workflow_project = Some(key.clone());
+                            this.picking_project = false;
+                            this.load_workflows(cx);
+                        }))
+                        .child(icon(icons::FOLDER).size(px(13.0)).text_color(T.text3))
+                        .child(div().flex_1().min_w_0().truncate().child(project.name.clone()))
+                        .when(selected, |d| d.child(icon(icons::CHECK).size(px(12.0)).text_color(T.accent)))
+                }),
             )
-            .when(self.workflows_open, |d| d.child(body))
+        });
+        let can_pick = self.projects.len() > 1;
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when_some(current.clone(), |d, project| {
+                d.child(
+                    div()
+                        .id("wf-project")
+                        .mx_2()
+                        .mt_1()
+                        .mb_1()
+                        .h(px(30.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(6.0))
+                        .text_color(T.text2)
+                        .when(can_pick, |d| {
+                            d.cursor_pointer().hover(|d| d.bg(T.hover)).on_click(cx.listener(|this, _, _, cx| {
+                                this.picking_project = !this.picking_project;
+                                cx.notify();
+                            }))
+                        })
+                        .child(icon(icons::FOLDER).size(px(13.0)).text_color(T.text3))
+                        .child(div().flex_1().min_w_0().truncate().text_color(T.text).child(project.name))
+                        .when(can_pick, |d| d.child(icon(if self.picking_project { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }).size(px(12.0)).text_color(T.text3))),
+                )
+            })
+            .children(picker)
+            .child(body)
+            .child(
+                div().border_t_1().border_color(T.border).p_2().child(
+                    div()
+                        .id("new-workflow")
+                        .h(px(30.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(6.0))
+                        .text_color(T.text2)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(T.hover))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))
+                        .child(icon(icons::PLUS).size(px(14.0)))
+                        .child("Nouveau workflow"),
+                ),
+            )
     }
 
     fn render_center(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1526,7 +1700,7 @@ impl Workspace {
     }
 
     fn render_right(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let panel = div().w(px(576.0)).flex_shrink_0().flex().flex_col().bg(T.surface).border_l_1().border_color(T.border).min_h_0();
+        let panel = div().w(px(self.layout.right)).flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
         if let RightPanel::Run(id) = self.right {
             if let Some(view) = self.render_run(id, cx) {
                 return Some(panel.child(self.render_right_tabs(None, cx)).child(view));
@@ -1913,6 +2087,22 @@ fn conversation_row(id: impl Into<ElementId>, title: SharedString, date: Option<
         .when_some(date, |d, date| d.child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(date)))
 }
 
+/// Bordure entre deux panneaux, à glisser pour les redimensionner.
+fn splitter(id: &'static str, split: Split, background: Rgba) -> Stateful<Div> {
+    div()
+        .id(id)
+        .group(id)
+        .w(px(5.0))
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .bg(background)
+        .cursor_col_resize()
+        .on_drag(split, |split, _, _, cx| cx.new(|_| *split))
+        .child(div().w(px(1.0)).h_full().bg(T.border).group_hover(id, |d| d.bg(T.accent)))
+}
+
 fn section_label(text: &str) -> Div {
     div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(T.text3).child(text.to_uppercase())
 }
@@ -1936,6 +2126,37 @@ fn same_path(a: &Path, b: &Path) -> bool {
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&path).any(|dir| ["", ".exe", ".cmd", ".bat"].iter().any(|ext| dir.join(format!("{program}{ext}")).is_file()))
+}
+
+// — Disposition des panneaux (fichier de réglages de SupaCode)
+
+const ACTIVITY_BAR: f32 = 48.0;
+const MIN_SIDEBAR: f32 = 200.0;
+const MAX_SIDEBAR: f32 = 520.0;
+const MIN_RIGHT: f32 = 320.0;
+const MIN_CENTER: f32 = 360.0;
+
+fn layout_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("SupaCode").join("disposition.json"))
+}
+
+fn load_layout() -> Layout {
+    let value = layout_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let get = |key: &str| value.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_f64()).map(|v| v as f32);
+    let default = Layout::default();
+    Layout {
+        sidebar: get("barre_laterale").unwrap_or(default.sidebar).clamp(MIN_SIDEBAR, MAX_SIDEBAR),
+        right: get("panneau_droit").unwrap_or(default.right).max(MIN_RIGHT),
+    }
+}
+
+fn save_layout(layout: Layout) {
+    let Some(file) = layout_file() else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let value = serde_json::json!({ "barre_laterale": layout.sidebar.round(), "panneau_droit": layout.right.round() });
+    let _ = std::fs::write(file, serde_json::to_string_pretty(&value).unwrap_or_default());
 }
 
 // — Projets ajoutés à la main (fichier de réglages de SupaCode)
