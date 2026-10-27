@@ -66,7 +66,11 @@ cargo run -p supacode-app --release
 cargo test --workspace
 ```
 
-L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic sur une conversation la reprend (`claude --resume`). Les workflows d'un projet se lancent avec ▶ dans la section Workflows.
+L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic sur une conversation la reprend (`claude --resume`).
+
+- **Ctrl+K** (ou Ctrl+P) : palette pour retrouver une conversation, un fichier, un projet ou une commande.
+- **Workflows** : ▶ pour lancer, suivi étape par étape à droite avec les validations ; les workflows `{"save": "<glob>"}` se lancent seuls à l'enregistrement d'un fichier correspondant.
+- **Nouveau workflow** (bouton + de la section Workflows) : décris-le en français, Claude lit le projet et propose les étapes ; tu vérifies l'aperçu puis tu le crées.
 
 ## Configuration
 

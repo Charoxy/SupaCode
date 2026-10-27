@@ -10,7 +10,7 @@ use gpui_kit::*;
 use supacode_core::claude::{self, Conversation, Project};
 use supacode_core::engine::RunStatus;
 use supacode_core::time::relative;
-use supacode_core::workflows::{WorkflowFile, load_workflows};
+use supacode_core::workflows::{Trigger, WorkflowFile, load_workflows};
 
 use crate::creator::{Creator, CreatorEvent};
 use crate::highlight::{self, Spans, code_text};
@@ -97,6 +97,9 @@ pub struct Workspace {
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
     focus: FocusHandle,
     watcher: Option<notify::RecommendedWatcher>,
+    /// Surveillance du projet courant pour les workflows déclenchés à l'enregistrement.
+    save_watcher: Option<(PathBuf, notify::RecommendedWatcher)>,
+    save_rules: Vec<(globset::GlobMatcher, String, WorkflowFile)>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -128,6 +131,8 @@ impl Workspace {
             opened: None,
             focus: cx.focus_handle(),
             watcher: None,
+            save_watcher: None,
+            save_rules: Vec::new(),
             _tasks: Vec::new(),
         };
         this.refresh_projects(cx);
@@ -274,7 +279,64 @@ impl Workspace {
         };
         self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
         self.branch = preview::git_branch(&project.path);
+        self.watch_saves(project.path, cx);
         cx.notify();
+    }
+
+    /// Déclencheurs `{ "save": "<glob>" }` des workflows du projet courant.
+    fn watch_saves(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.save_rules.clear();
+        for file in self.workflows.as_ref().map(|w| w.as_slice()).unwrap_or_default() {
+            for trigger in file.workflow.triggers() {
+                if let Trigger::Save { save } = trigger {
+                    if let Ok(glob) = globset::GlobBuilder::new(&save).literal_separator(true).build() {
+                        self.save_rules.push((glob.compile_matcher(), save, file.clone()));
+                    }
+                }
+            }
+        }
+        if self.save_rules.is_empty() {
+            self.save_watcher = None;
+            return;
+        }
+        if self.save_watcher.as_ref().is_some_and(|(path, _)| same_path(path, &root)) {
+            return;
+        }
+        let Ok((watcher, rx)) = preview::watch(&root) else {
+            self.save_watcher = None;
+            return;
+        };
+        self.save_watcher = Some((root.clone(), watcher));
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(first) = rx.recv().await {
+                cx.background_executor().timer(preview::DEBOUNCE).await;
+                let mut paths = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    paths.push(more);
+                }
+                paths.sort();
+                paths.dedup();
+                let alive = this.update(cx, |this, cx| {
+                    // Le projet a changé entre-temps : cette surveillance n'est plus la bonne.
+                    if !this.save_watcher.as_ref().is_some_and(|(path, _)| same_path(path, &root)) {
+                        return;
+                    }
+                    for path in &paths {
+                        let Ok(relative) = path.strip_prefix(&root) else { continue };
+                        let relative = relative.display().to_string().replace('\\', "/");
+                        let matching: Vec<_> = this.save_rules.iter().filter(|(glob, ..)| glob.is_match(&relative)).map(|(_, save, file)| (save.clone(), file.clone())).collect();
+                        for (save, file) in matching {
+                            let context = HashMap::from([("file".to_owned(), relative.clone())]);
+                            this.start_workflow(root.clone(), file, format!("save {save}"), context, false, cx);
+                        }
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+        self._tasks.push(task);
     }
 
     fn current_project(&self) -> Option<Project> {

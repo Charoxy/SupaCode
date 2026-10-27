@@ -77,6 +77,8 @@ pub(super) struct WorkflowRun {
     pub(super) name: String,
     pub(super) project: PathBuf,
     branch: Option<String>,
+    /// « manuel », « save src/**/*.ts »…
+    trigger: String,
     started: Instant,
     pub(super) status: Option<RunStatus>,
     cancel: Arc<AtomicBool>,
@@ -232,6 +234,11 @@ fn ago(d: Duration) -> String {
 impl Workspace {
     /// Lance le workflow dans le projet ; le panneau de droite affiche son suivi.
     pub(super) fn run_workflow(&mut self, project: PathBuf, file: WorkflowFile, cx: &mut Context<Self>) {
+        self.start_workflow(project, file, "manuel".into(), HashMap::new(), true, cx);
+    }
+
+    /// Lance le workflow avec son contexte (`{{file}}`…) ; `show` affiche son suivi à droite.
+    pub(super) fn start_workflow(&mut self, project: PathBuf, file: WorkflowFile, trigger: String, context: HashMap<String, String>, show: bool, cx: &mut Context<Self>) {
         // Une seule exécution par workflow : l'ancienne (terminée) est remplacée.
         if self.runs.iter().any(|r| r.workflow_id == file.id && same_path(&r.project, &project) && r.running()) {
             return;
@@ -248,17 +255,20 @@ impl Workspace {
             name: file.workflow.name.clone(),
             project: project.clone(),
             branch: preview::git_branch(&project),
+            trigger,
             started: Instant::now(),
             status: None,
             cancel: cancel.clone(),
             steps,
             approval: None,
         });
-        self.right = RightPanel::Run(id);
+        if show {
+            self.right = RightPanel::Run(id);
+        }
 
         let (tx, rx) = async_channel::unbounded();
         let workflow = file.workflow;
-        let options = RunOptions { cwd: project.clone(), context: HashMap::new(), cancel };
+        let options = RunOptions { cwd: project.clone(), context, cancel };
         std::thread::spawn(move || {
             engine::run(&workflow, &options, &ChannelHost(tx));
         });
@@ -377,7 +387,7 @@ impl Workspace {
                             .text_size(px(12.0))
                             .text_color(T.text3)
                             .child("Déclenché par")
-                            .child(div().font_family(theme::MONO_FONT).text_color(T.text2).child("manuel"))
+                            .child(div().font_family(theme::MONO_FONT).text_color(T.text2).child(run.trigger.clone()))
                             .children(run.branch.clone().map(|b| format!("· {b}")))
                             .child(format!("· {}", ago(run.started.elapsed()))),
                     ),

@@ -6138,6 +6138,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "dirs 6.0.0",
+ "globset",
  "gpui-kit",
  "notify",
  "serde_json",

@@ -53,22 +53,27 @@ pub struct Spawn<'a> {
     pub env: HashMap<String, String>,
     /// Envoyé sur l'entrée standard, qui est ensuite fermée.
     pub stdin: Option<String>,
+    /// Sous Windows : fin de ligne de commande transmise telle quelle (voir [`Spawn::shell`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    raw: Option<String>,
 }
 
 impl<'a> Spawn<'a> {
     /// Commande passée au shell du système (`cmd.exe /c` ou `sh -c`).
     pub fn shell(command: &str, cwd: &'a Path) -> Self {
-        let (program, args) = if cfg!(windows) {
-            ("cmd.exe".to_owned(), vec!["/d".to_owned(), "/s".to_owned(), "/c".to_owned(), command.to_owned()])
+        if cfg!(windows) {
+            // `cmd.exe` ne comprend pas l'échappement `\"` qu'appliquerait Rust : la commande est
+            // passée brute, entre guillemets que `/s` retire.
+            let args = ["/d", "/s", "/c"].map(Into::into).into();
+            Self { program: "cmd.exe".into(), args, cwd, env: HashMap::new(), stdin: None, raw: Some(format!("\"{command}\"")) }
         } else {
-            ("sh".to_owned(), vec!["-c".to_owned(), command.to_owned()])
-        };
-        Self { program, args, cwd, env: HashMap::new(), stdin: None }
+            Self { program: "sh".into(), args: vec!["-c".into(), command.into()], cwd, env: HashMap::new(), stdin: None, raw: None }
+        }
     }
 
     pub fn program(program: &str, args: Vec<String>, cwd: &'a Path) -> Self {
         let (program, args) = resolve_program(program, args);
-        Self { program, args, cwd, env: HashMap::new(), stdin: None }
+        Self { program, args, cwd, env: HashMap::new(), stdin: None, raw: None }
     }
 }
 
@@ -98,6 +103,9 @@ pub fn run_lines(spawn: Spawn, cancel: &AtomicBool, mut on_line: impl FnMut(Line
         // Application graphique : pas de fenêtre de console pour chaque commande.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
+        if let Some(raw) = &spawn.raw {
+            command.raw_arg(raw);
+        }
     }
     let mut child = command.spawn().with_context(|| format!("impossible de lancer {}", spawn.program))?;
 
@@ -114,7 +122,7 @@ pub fn run_lines(spawn: Spawn, cancel: &AtomicBool, mut on_line: impl FnMut(Line
             let tx = tx.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stream).split(b'\n').map_while(Result::ok) {
-                    let text = String::from_utf8_lossy(&line).trim_end_matches('\r').to_owned();
+                    let text = decode(&line).trim_end_matches('\r').to_owned();
                     if tx.send(Line { text, stderr }).is_err() {
                         break;
                     }
@@ -140,6 +148,33 @@ pub fn run_lines(spawn: Spawn, cancel: &AtomicBool, mut on_line: impl FnMut(Line
     }
     let status = child.wait()?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+/// Texte d'une ligne de sortie : UTF-8, sinon (Windows) la page de code OEM de la console,
+/// celle qu'utilisent `cmd.exe` et ses commandes internes.
+fn decode(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MultiByteToWideChar(code_page: u32, flags: u32, text: *const u8, len: i32, wide: *mut u16, wide_len: i32) -> i32;
+        }
+        const CP_OEMCP: u32 = 1;
+        let len = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
+        // SAFETY : tampons valides et longueurs exactes ; le premier appel ne fait que mesurer.
+        let needed = unsafe { MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+        if needed > 0 {
+            let mut wide = vec![0u16; needed as usize];
+            let written = unsafe { MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), needed) };
+            if written > 0 {
+                return String::from_utf16_lossy(&wide[..written as usize]);
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Arrête le processus et ses descendants (`cmd /c` laisse sinon tourner la vraie commande).
@@ -171,5 +206,18 @@ mod tests {
         let lines: Vec<_> = lines.iter().map(|l| l.trim()).collect();
         assert_eq!(lines, ["un", "deux"]);
         assert_eq!(code, Some(3));
+    }
+
+    #[test]
+    fn garde_les_guillemets_de_la_commande() {
+        let cancel = AtomicBool::new(false);
+        let dir = std::env::temp_dir().join(format!("supacode-quotes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a b.txt"), "contenu").unwrap();
+        let command = if cfg!(windows) { r#"type "a b.txt""# } else { r#"cat "a b.txt""# };
+        let mut lines = Vec::new();
+        let code = run_lines(Spawn::shell(command, &dir), &cancel, |l| lines.push(l.text)).unwrap();
+        assert_eq!((code, lines), (Some(0), vec!["contenu".to_owned()]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
