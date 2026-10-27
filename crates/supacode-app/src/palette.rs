@@ -28,6 +28,7 @@ pub enum Command {
     NewWorkflow,
     AddProject,
     RunWorkflow(PathBuf, WorkflowFile),
+    EditWorkflow(PathBuf, WorkflowFile),
 }
 
 #[derive(Clone)]
@@ -343,7 +344,11 @@ fn row(index: usize, item: &Item, positions: &[usize], selected: bool, now: Syst
         }
         Item::Project(project) => (icon(icons::FOLDER).size(px(16.0)).text_color(T.text2).into_any_element(), Some(project.path.display().to_string()), None),
         Item::Command { hint, command, .. } => (
-            icon(if matches!(command, Command::RunWorkflow(..)) { icons::WORKFLOW } else { icons::PLUS }).size(px(16.0)).text_color(T.text2).into_any_element(),
+            icon(match command {
+                Command::RunWorkflow(..) => icons::WORKFLOW,
+                Command::EditWorkflow(..) => icons::EDIT,
+                _ => icons::PLUS,
+            }).size(px(16.0)).text_color(T.text2).into_any_element(),
             None,
             *hint,
         ),

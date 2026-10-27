@@ -70,7 +70,8 @@ L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic s
 
 - **Ctrl+K** (ou Ctrl+P) : palette pour retrouver une conversation, un fichier, un projet ou une commande.
 - **Workflows** : ▶ pour lancer, suivi étape par étape à droite avec les validations ; les workflows `{"save": "<glob>"}` se lancent seuls à l'enregistrement d'un fichier correspondant.
-- **Nouveau workflow** (bouton + de la section Workflows) : décris-le en français, Claude lit le projet et propose les étapes ; tu vérifies l'aperçu puis tu le crées.
+- **Nouveau workflow** (bouton + de la section Workflows) : décris-le en français, Claude lit le projet et propose les étapes ; tu vérifies l'aperçu puis tu le crées, ou tu l'ouvres dans l'éditeur.
+- **Éditeur visuel** (crayon sur un workflow, ou Ctrl+K) : blocs Commande, Agent, Validation et Parallèle, conditions, choix de l'agent et du modèle, déclencheurs ; « Tester » enregistre et lance le workflow.
 
 ## Configuration
 

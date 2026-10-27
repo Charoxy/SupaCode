@@ -26,7 +26,7 @@ impl Trigger {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +108,15 @@ pub fn save_workflow(project: &Path, id: &str, workflow: &Workflow) -> Result<St
 ";
     fs::write(dir.join(format!("{candidate}.json")), text).context("écriture du workflow impossible")?;
     Ok(candidate)
+}
+
+/// Réécrit `.supacode/workflows/<id>.json` (modification d'un workflow existant).
+pub fn write_workflow(project: &Path, id: &str, workflow: &Workflow) -> Result<()> {
+    let dir = project.join(".supacode").join("workflows");
+    fs::create_dir_all(&dir).with_context(|| format!("impossible de créer {}", dir.display()))?;
+    let text = serde_json::to_string_pretty(workflow)? + "
+";
+    fs::write(dir.join(format!("{id}.json")), text).context("écriture du workflow impossible")
 }
 
 #[cfg(test)]

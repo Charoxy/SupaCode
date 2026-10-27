@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod claude;
+pub mod edit;
 pub mod engine;
 pub mod generate;
 pub mod process;

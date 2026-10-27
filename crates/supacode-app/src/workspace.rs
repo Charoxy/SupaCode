@@ -13,6 +13,7 @@ use supacode_core::time::relative;
 use supacode_core::workflows::{Trigger, WorkflowFile, load_workflows};
 
 use crate::creator::{Creator, CreatorEvent};
+use crate::editor::{Editor, EditorEvent};
 use crate::highlight::{self, Spans, code_text};
 use crate::icons::{self, icon};
 use crate::palette::{self, Palette, PaletteEvent};
@@ -93,6 +94,8 @@ pub struct Workspace {
     window_title: String,
     palette: Option<Entity<Palette>>,
     creator: Option<Entity<Creator>>,
+    /// Éditeur visuel : remplace la conversation et le panneau de droite tant qu'il est ouvert.
+    editor: Option<Entity<Editor>>,
     opened: Option<OpenedFile>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
     focus: FocusHandle,
@@ -128,6 +131,7 @@ impl Workspace {
             window_title: "SupaCode".into(),
             palette: None,
             creator: None,
+            editor: None,
             opened: None,
             focus: cx.focus_handle(),
             watcher: None,
@@ -174,6 +178,26 @@ impl Workspace {
                     this.toggle_palette(window, cx);
                     if let Some(palette) = this.palette.clone() {
                         palette.update(cx, |palette, cx| palette.set_query(&query, window, cx));
+                    }
+                });
+            });
+            this._tasks.push(task);
+        }
+        // Débogage : `SUPACODE_PROJECT=<dossier>` sélectionne ce projet ; `SUPACODE_EDIT=<id>` ouvre
+        // ensuite l'éditeur sur ce workflow.
+        #[cfg(debug_assertions)]
+        if let Ok(path) = std::env::var("SUPACODE_PROJECT") {
+            let task = cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let Some(project) = this.projects.iter().find(|p| same_path(&p.path, Path::new(&path))).cloned() else { return };
+                    this.selected_project = Some(project_key(&project));
+                    this.load_workflows(cx);
+                    if let Ok(id) = std::env::var("SUPACODE_EDIT") {
+                        let file = load_workflows(&project.path).ok().and_then(|files| files.into_iter().find(|f| f.id == id));
+                        if let Some(file) = file {
+                            this.open_editor(project.path.clone(), project.name.clone(), Some(file.id), file.workflow, window, cx);
+                        }
                     }
                 });
             });
@@ -565,6 +589,11 @@ impl Workspace {
                     hint: None,
                     command: palette::Command::RunWorkflow(project.path.clone(), file.clone()),
                 });
+                commands.push(palette::Item::Command {
+                    label: format!("Workflow : modifier « {} »", file.workflow.name),
+                    hint: None,
+                    command: palette::Command::EditWorkflow(project.path.clone(), file.clone()),
+                });
             }
         }
         let root = self.current_project().map(|p| p.path);
@@ -612,6 +641,10 @@ impl Workspace {
                 palette::Command::NewConversation => self.new_conversation(None, window, cx),
                 palette::Command::NewWorkflow => self.open_creator(window, cx),
                 palette::Command::AddProject => self.add_project(cx),
+                palette::Command::EditWorkflow(path, file) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.open_editor(path, name, Some(file.id), file.workflow, window, cx);
+                }
                 palette::Command::RunWorkflow(path, file) => {
                     self.run_workflow(path, file, cx);
                     self.refocus(window, cx);
@@ -629,6 +662,12 @@ impl Workspace {
         let creator = cx.new(|cx| Creator::new(project.path.clone(), project.name.clone(), window, cx));
         cx.subscribe_in(&creator, window, |this, _, event: &CreatorEvent, window, cx| {
             this.creator = None;
+            if let CreatorEvent::Edit(workflow) = event {
+                if let Some(project) = this.current_project() {
+                    this.open_editor(project.path, project.name, None, workflow.clone(), window, cx);
+                }
+                return;
+            }
             if let CreatorEvent::Created(id) = event {
                 this.workflows_open = true;
                 this.load_workflows(cx);
@@ -641,6 +680,33 @@ impl Workspace {
         })
         .detach();
         self.creator = Some(creator);
+        cx.notify();
+    }
+
+    fn open_editor(&mut self, project: PathBuf, project_name: String, id: Option<String>, workflow: supacode_core::workflows::Workflow, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = cx.new(|cx| Editor::new(project.clone(), project_name, id, workflow, window, cx));
+        cx.subscribe_in(&editor, window, move |this, _, event: &EditorEvent, window, cx| {
+            match event {
+                EditorEvent::Close => {
+                    this.editor = None;
+                    this.refocus(window, cx);
+                }
+                EditorEvent::Saved { id, run } => {
+                    this.load_workflows(cx);
+                    if *run {
+                        // « Tester » : on quitte l'éditeur pour suivre l'exécution.
+                        this.editor = None;
+                        let file = load_workflows(&project).ok().and_then(|files| files.into_iter().find(|f| &f.id == id));
+                        if let Some(file) = file {
+                            this.run_workflow(project.clone(), file, cx);
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+        self.editor = Some(editor);
         cx.notify();
     }
 
@@ -728,8 +794,8 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .child(self.render_sidebar(window, cx))
-                    .child(self.render_center(window, cx))
-                    .children(self.render_right(cx)),
+                    .when_some(self.editor.clone(), |d, editor| d.child(div().flex_1().min_w_0().child(editor)))
+                    .when(self.editor.is_none(), |d| d.child(self.render_center(window, cx)).children(self.render_right(cx))),
             )
             .child(self.render_status(cx))
             .children(overlay)
@@ -986,6 +1052,26 @@ impl Workspace {
                         (None, None) => button,
                     };
                     let finished = run.filter(|r| !r.running()).and_then(|r| r.status);
+                    let edit_button = project.clone().map(|path| {
+                        let file = file.clone();
+                        div()
+                            .id(("wf-edit", i))
+                            .size(px(24.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .text_color(T.text3)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.raised).text_color(T.text))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                this.open_editor(path.clone(), name, Some(file.id.clone()), file.workflow.clone(), window, cx);
+                            }))
+                            .child(icon(icons::EDIT).size(px(12.0)))
+                    });
                     body = body.child(
                         div()
                             .id(("workflow", i))
@@ -1024,6 +1110,7 @@ impl Workspace {
                                 };
                                 d.child(icon(mark).size(px(12.0)).text_color(color))
                             })
+                            .children(edit_button)
                             .child(button),
                     );
                 }

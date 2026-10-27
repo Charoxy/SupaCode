@@ -10,7 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use supacode_core::agents::AgentEvent;
 use supacode_core::generate::{self, Generated};
-use supacode_core::workflows::{Step, Trigger, save_workflow};
+use supacode_core::workflows::{Step, Trigger, Workflow, save_workflow};
 
 use crate::highlight::{self, code_text};
 use crate::icons::{self, icon};
@@ -32,6 +32,8 @@ enum State {
 pub enum CreatorEvent {
     /// Workflow enregistré sous cet id.
     Created(String),
+    /// Ouvrir le workflow proposé dans l'éditeur visuel, sans l'enregistrer.
+    Edit(Workflow),
     Dismiss,
 }
 
@@ -127,6 +129,16 @@ impl Creator {
                 cx.notify();
             }
         }
+    }
+
+    fn edit(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(generated) = &self.state else { return };
+        let mut workflow = generated.workflow.clone();
+        let name = self.name.read(cx).value().trim().to_owned();
+        if !name.is_empty() {
+            workflow.name = name;
+        }
+        cx.emit(CreatorEvent::Edit(workflow));
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
@@ -398,6 +410,22 @@ impl Render for Creator {
                     .hover(|d| d.bg(T.hover))
                     .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx)))
                     .child("Annuler"),
+            )
+            .child(
+                div()
+                    .id("creator-edit")
+                    .h(px(32.0))
+                    .px(px(14.0))
+                    .flex()
+                    .items_center()
+                    .border_1()
+                    .border_color(T.border)
+                    .rounded(px(6.0))
+                    .bg(T.raised)
+                    .when(!ready, |d| d.opacity(0.4))
+                    .when(ready, |d| d.cursor_pointer().hover(|d| d.bg(T.hover)))
+                    .on_click(cx.listener(|this, _, _, cx| this.edit(cx)))
+                    .child("Modifier dans l'éditeur"),
             )
             .child(
                 div()

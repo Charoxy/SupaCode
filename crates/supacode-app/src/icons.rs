@@ -15,6 +15,8 @@ pub const CLAUDE: &str = svg!(r#"<path stroke-width="1.8" d="M8 2v12M2 8h12M3.8 
 pub const CODEX: &str = svg!(r#"<path d="M8 1.8l5.4 3.1v6.2L8 14.2l-5.4-3.1V4.9z"/><path d="M8 5.5v5"/>"#);
 pub const FOLDER: &str = svg!(r#"<path stroke-width="1.4" d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l1.5 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/>"#);
 pub const CHEVRON_DOWN: &str = svg!(r#"<path d="M4 6l4 4 4-4"/>"#);
+pub const CHEVRON_LEFT: &str = svg!(r#"<path d="M10 4L6 8l4 4"/>"#);
+pub const EDIT: &str = svg!(r#"<path stroke-width="1.4" d="M10.5 2.5l3 3L6 13H3v-3z"/>"#);
 pub const CHEVRON_RIGHT: &str = svg!(r#"<path d="M6 4l4 4-4 4"/>"#);
 pub const PLUS: &str = svg!(r#"<path stroke-width="1.6" d="M8 3v10M3 8h10"/>"#);
 pub const CLOSE: &str = svg!(r#"<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>"#);

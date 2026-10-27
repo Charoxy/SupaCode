@@ -85,6 +85,16 @@ pub fn validate(workflow: &Workflow) -> Result<()> {
         if kinds != 1 {
             bail!("l'étape « {} » doit avoir exactement un des champs run, prompt, approve ou parallel", step.id);
         }
+        let empty = |text: &Option<String>| text.as_deref().is_some_and(|t| t.trim().is_empty());
+        if empty(&step.run) {
+            bail!("l'étape « {} » n'a pas de commande", step.id);
+        }
+        if empty(&step.prompt) {
+            bail!("l'étape « {} » n'a pas d'instructions pour l'agent", step.id);
+        }
+        if empty(&step.approve) {
+            bail!("la validation « {} » n'a pas de question", step.id);
+        }
         if step.kind() == StepKind::Parallel && step.parallel.as_ref().is_some_and(Vec::is_empty) {
             bail!("le groupe parallèle « {} » est vide", step.id);
         }
@@ -194,6 +204,7 @@ mod tests {
         assert!(bad(r#"[{"id":"a","run":"x","approve":"y"}]"#).contains("exactement un"));
         assert!(bad(r#"[{"id":"a","run":"x"},{"id":"a","run":"y"}]"#).contains("double"));
         assert!(bad(r#"[{"id":"a","if":"steps.b.failed","run":"x"},{"id":"b","run":"y"}]"#).contains("condition"));
+        assert!(bad(r#"[{"id":"a","run":"  "}]"#).contains("pas de commande"));
         assert!(parse("pas de json").is_err());
     }
 
