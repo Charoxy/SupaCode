@@ -27,6 +27,7 @@ pub enum Command {
     NewConversation,
     NewWorkflow,
     AddProject,
+    OpenBrowser,
     RunWorkflow(PathBuf, WorkflowFile),
     EditWorkflow(PathBuf, WorkflowFile),
 }

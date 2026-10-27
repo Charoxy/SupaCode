@@ -186,7 +186,7 @@ impl TerminalView {
         }
     }
 
-    fn paste(&self, text: &str) {
+    pub fn paste(&self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.term.lock().mode().contains(TermMode::BRACKETED_PASTE) {
             self.write(format!("\x1b[200~{text}\x1b[201~").into_bytes());

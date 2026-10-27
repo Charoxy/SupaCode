@@ -72,6 +72,8 @@ L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic s
 - **Workflows** : ▶ pour lancer, suivi étape par étape à droite avec les validations ; les workflows `{"save": "<glob>"}` se lancent seuls à l'enregistrement d'un fichier correspondant.
 - **Nouveau workflow** (bouton + de la section Workflows) : décris-le en français, Claude lit le projet et propose les étapes ; tu vérifies l'aperçu puis tu le crées, ou tu l'ouvres dans l'éditeur.
 - **Éditeur visuel** (crayon sur un workflow, ou Ctrl+K) : blocs Commande, Agent, Validation et Parallèle, conditions, choix de l'agent et du modèle, déclencheurs ; « Tester » enregistre et lance le workflow.
+- **Navigateur** (globe dans la barre de gauche, ou Ctrl+K) : une vraie page web (WebView2) dans le panneau de droite. « Sélectionner » numérote des éléments de la page, « Dessiner » permet d'entourer ou de barrer ; « Envoyer à l'agent » colle ton commentaire, les éléments choisis et une capture annotée (`.supacode/captures/`, ignoré par git) dans la conversation ouverte.
+- **Les agents pilotent le navigateur** : chaque `claude` lancé par l'IDE reçoit le serveur MCP local de SupaCode (`browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`…) pour tester une fonctionnalité sous tes yeux.
 
 ## Configuration
 

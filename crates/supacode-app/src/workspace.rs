@@ -12,10 +12,12 @@ use supacode_core::engine::RunStatus;
 use supacode_core::time::relative;
 use supacode_core::workflows::{Trigger, WorkflowFile, load_workflows};
 
+use crate::browser::{self, BrowserEvent, BrowserView, Feedback};
 use crate::creator::{Creator, CreatorEvent};
 use crate::editor::{Editor, EditorEvent};
 use crate::highlight::{self, Spans, code_text};
 use crate::icons::{self, icon};
+use crate::mcp;
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::preview::{self, ChangedFile, LineKind};
 use crate::terminal::{Command, TerminalEvent, TerminalView};
@@ -87,6 +89,8 @@ enum RightPanel {
     Code,
     /// Suivi d'une exécution de workflow.
     Run(usize),
+    /// Navigateur intégré.
+    Browser,
     /// Fichier ouvert depuis la palette.
     File,
 }
@@ -142,6 +146,9 @@ pub struct Workspace {
     /// Éditeur visuel : remplace la conversation et le panneau de droite tant qu'il est ouvert.
     editor: Option<Entity<Editor>>,
     opened: Option<OpenedFile>,
+    browser: Option<Entity<BrowserView>>,
+    /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
+    mcp_config: Option<PathBuf>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
     focus: FocusHandle,
     watcher: Option<notify::RecommendedWatcher>,
@@ -183,6 +190,8 @@ impl Workspace {
             window_title: "SupaCode".into(),
             palette: None,
             creator: None,
+            browser: None,
+            mcp_config: None,
             editor: None,
             opened: None,
             focus: cx.focus_handle(),
@@ -192,6 +201,7 @@ impl Workspace {
             _tasks: Vec::new(),
         };
         this.refresh_projects(cx);
+        this.start_mcp(window, cx);
         window.focus(&this.focus, cx);
 
         // Animation « en cours » (jeton `pulse` : 700 ms) et actualisation de la liste.
@@ -503,10 +513,15 @@ impl Workspace {
         // Une nouvelle conversation reçoit son identifiant tout de suite : son titre réel
         // remplacera « Nouvelle conversation » dès que Claude Code l'aura enregistrée.
         let session = conversation.as_ref().map(|c| c.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut args = match &conversation {
-            Some(_) => vec!["--resume".to_owned(), session.clone()],
-            None => vec!["--session-id".to_owned(), session.clone()],
-        };
+        let mut args = Vec::new();
+        if let Some(config) = &self.mcp_config {
+            // Les deux options prennent plusieurs valeurs : chacune doit être suivie d'une autre option.
+            args.extend(["--mcp-config".to_owned(), config.display().to_string(), "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
+        }
+        args.extend(match &conversation {
+            Some(_) => ["--resume".to_owned(), session.clone()],
+            None => ["--session-id".to_owned(), session.clone()],
+        });
         args.extend(prompt);
         let command = Command { program: "claude".into(), args, cwd: project.path.clone() };
         let terminal = cx.new(|cx| TerminalView::new(command, window, cx));
@@ -671,6 +686,7 @@ impl Workspace {
             palette::Item::Command { label: "Nouvelle conversation".into(), hint: None, command: palette::Command::NewConversation },
             palette::Item::Command { label: "Nouveau workflow…".into(), hint: None, command: palette::Command::NewWorkflow },
             palette::Item::Command { label: "Ajouter un projet".into(), hint: None, command: palette::Command::AddProject },
+            palette::Item::Command { label: "Ouvrir le navigateur".into(), hint: None, command: palette::Command::OpenBrowser },
         ];
         if let (Some(project), Ok(workflows)) = (self.workflows_project(), &self.workflows) {
             for file in workflows {
@@ -731,6 +747,9 @@ impl Workspace {
                 palette::Command::NewConversation => self.new_conversation(None, window, cx),
                 palette::Command::NewWorkflow => self.open_creator(window, cx),
                 palette::Command::AddProject => self.add_project(cx),
+                palette::Command::OpenBrowser => {
+                    self.ensure_browser(window, cx);
+                }
                 palette::Command::EditWorkflow(path, file) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     self.open_editor(path, name, Some(file.id), file.workflow, window, cx);
@@ -801,6 +820,112 @@ impl Workspace {
     }
 
     /// Rend le clavier à la conversation active.
+    /// Serveur MCP du navigateur : les appels des agents sont exécutés ici, dans l'interface.
+    fn start_mcp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let server = match mcp::start() {
+            Ok(server) => server,
+            Err(e) => {
+                eprintln!("serveur MCP indisponible : {e:#}");
+                return;
+            }
+        };
+        self.mcp_config = mcp::write_claude_config(&server.url);
+        let calls = server.calls;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(call) = calls.recv().await {
+                let Ok(browser) = this.update_in(cx, |this, window, cx| this.ensure_browser(window, cx).downgrade()) else { break };
+                cx.spawn(async move |cx| {
+                    let result = browser::call_tool(browser, &call.tool, call.args, cx).await;
+                    let _ = call.reply.send(result).await;
+                })
+                .detach();
+            }
+        });
+        self._tasks.push(task);
+    }
+
+    /// Ouvre le navigateur dans le panneau de droite (en le créant au besoin).
+    fn ensure_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserView> {
+        self.right = RightPanel::Browser;
+        cx.notify();
+        if let Some(browser) = &self.browser {
+            return browser.clone();
+        }
+        let browser = cx.new(|cx| BrowserView::new(None, window, cx));
+        cx.subscribe_in(&browser, window, |this, _, event: &BrowserEvent, window, cx| match event {
+            BrowserEvent::Send(feedback) => this.send_feedback(feedback, window, cx),
+        })
+        .detach();
+        self.browser = Some(browser.clone());
+        browser
+    }
+
+    fn toggle_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser.is_some() && self.right == RightPanel::Browser {
+            self.right = RightPanel::Code;
+            cx.notify();
+        } else {
+            self.ensure_browser(window, cx);
+        }
+    }
+
+    fn close_browser(&mut self, cx: &mut Context<Self>) {
+        if let Some(browser) = self.browser.take() {
+            browser.update(cx, |b, _| b.set_shown(false));
+        }
+        if self.right == RightPanel::Browser {
+            self.right = RightPanel::Code;
+        }
+        cx.notify();
+    }
+
+    /// Retour de l'utilisateur sur une page : enregistre la capture et l'envoie à la conversation ouverte.
+    fn send_feedback(&mut self, feedback: &Feedback, window: &mut Window, cx: &mut Context<Self>) {
+        let mut text = feedback.text.clone();
+        if self.active_tab().is_none() && self.current_project().is_none() {
+            if let Some(browser) = &self.browser {
+                browser.update(cx, |b, cx| b.notice("Ajoute un projet ou ouvre une conversation pour envoyer ce retour à un agent.", cx));
+            }
+            return;
+        }
+        if let Some(png) = &feedback.screenshot {
+            let dir = match self.current_project() {
+                Some(project) => project.path.join(".supacode").join("captures"),
+                None => std::env::temp_dir().join("SupaCode").join("captures"),
+            };
+            let name = format!("capture-{}.png", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+            let saved = std::fs::create_dir_all(&dir).and_then(|_| {
+                // Les captures ne doivent pas finir dans le dépôt.
+                let ignore = dir.join(".gitignore");
+                if !ignore.exists() {
+                    std::fs::write(ignore, "*\n")?;
+                }
+                std::fs::write(dir.join(&name), png)
+            });
+            if saved.is_ok() {
+                text.push_str(&format!("\nCapture d'écran annotée : {}\n", dir.join(&name).display()));
+            }
+        }
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SUPACODE_FEEDBACK_LOG").is_some() {
+            eprintln!("— retour envoyé —\n{text}");
+            return;
+        }
+        match self.active_tab() {
+            Some(tab) if !tab.terminal.read(cx).exited => {
+                let terminal = tab.terminal.clone();
+                terminal.read(cx).paste(text.trim_end());
+                // Entrée un peu après le collage, pour que Claude Code l'ait bien reçu.
+                let task = cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(Duration::from_millis(150)).await;
+                    let _ = terminal.update(cx, |t, _| t.write(b"\r".as_slice()));
+                });
+                self._tasks.push(task);
+            }
+            _ => self.new_conversation(Some(text), window, cx),
+        }
+    }
+
     fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = match self.active_tab() {
             Some(tab) => tab.terminal.read(cx).focus_handle().clone(),
@@ -860,6 +985,10 @@ impl Render for Workspace {
             div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(84.0)).child(creator)
         });
         let activity = self.render_activity_bar(cx);
+        let browser_shown = self.right == RightPanel::Browser && self.palette.is_none() && self.creator.is_none() && self.editor.is_none();
+        if let Some(browser) = &self.browser {
+            browser.update(cx, |b, _| b.set_shown(browser_shown));
+        }
         let sidebar = self.sidebar_open.then(|| self.render_sidebar(window, cx).into_any_element());
         let (center, right) = if self.editor.is_none() {
             (Some(self.render_center(window, cx).into_any_element()), self.render_right(cx).map(|r| r.into_any_element()))
@@ -890,6 +1019,12 @@ impl Render for Workspace {
                 }
                 this.layout_dirty = true;
                 cx.notify();
+            }))
+            // Un clic dans SupaCode reprend le clavier à la page web.
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if let Some(browser) = &this.browser {
+                    browser.read(cx).release_focus();
+                }
             }))
             .capture_any_mouse_up(cx.listener(|this, _, _, _| {
                 if std::mem::take(&mut this.layout_dirty) {
@@ -1156,6 +1291,24 @@ impl Workspace {
             .child(div().mb_2().child(icons::logo(24.0)))
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
+            .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
+            .child({
+                let selected = self.browser.is_some() && self.right == RightPanel::Browser;
+                div()
+                    .id("activity-browser")
+                    .relative()
+                    .size(px(36.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_color(if selected { T.text } else { T.text3 })
+                    .when(selected, |d| d.bg(T.hover))
+                    .hover(|d| d.text_color(T.text))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_browser(window, cx)))
+                    .child(icon(icons::GLOBE).size(px(18.0)))
+            })
     }
 
     fn activity_button(&self, id: &'static str, svg: &'static str, tab: SidebarTab, badge: bool, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1700,7 +1853,12 @@ impl Workspace {
     }
 
     fn render_right(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let panel = div().w(px(self.layout.right)).flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
+        let panel = div().w(px(self.layout.right)).min_w(px(self.layout.right)).max_w(px(self.layout.right)).overflow_hidden().flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
+        if self.right == RightPanel::Browser {
+            if let Some(browser) = self.browser.clone() {
+                return Some(panel.child(self.render_right_tabs(None, cx)).child(div().flex_1().min_h_0().child(browser)));
+            }
+        }
         if let RightPanel::Run(id) = self.right {
             if let Some(view) = self.render_run(id, cx) {
                 return Some(panel.child(self.render_right_tabs(None, cx)).child(view));
@@ -1982,6 +2140,38 @@ impl Workspace {
                                     this.right = RightPanel::Code;
                                 }
                                 cx.notify();
+                            }))
+                            .child(icon(icons::CLOSE).size(px(11.0)).text_color(T.text3)),
+                    ),
+            );
+        }
+        if let Some(browser) = &self.browser {
+            let is_selected = self.right == RightPanel::Browser;
+            tabs = tabs.child(
+                div()
+                    .id("browser-tab")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_3()
+                    .border_r_1()
+                    .border_color(T.border)
+                    .cursor_pointer()
+                    .when(is_selected, |d| d.bg(T.surface).border_t_2().border_color(T.accent))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.right = RightPanel::Browser;
+                        cx.notify();
+                    }))
+                    .child(icon(icons::GLOBE).size(px(13.0)).text_color(if is_selected { T.accent } else { T.text3 }))
+                    .child(div().max_w(px(160.0)).truncate().text_color(if is_selected { T.text } else { T.text3 }).child(browser.read(cx).title()))
+                    .child(
+                        div()
+                            .id("browser-close")
+                            .rounded(px(4.0))
+                            .hover(|d| d.bg(T.hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_browser(cx);
                             }))
                             .child(icon(icons::CLOSE).size(px(11.0)).text_color(T.text3)),
                     ),
