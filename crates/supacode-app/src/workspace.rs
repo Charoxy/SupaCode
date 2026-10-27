@@ -12,6 +12,7 @@ use supacode_core::engine::RunStatus;
 use supacode_core::time::relative;
 use supacode_core::workflows::{WorkflowFile, load_workflows};
 
+use crate::creator::{Creator, CreatorEvent};
 use crate::highlight::{self, Spans, code_text};
 use crate::icons::{self, icon};
 use crate::palette::{self, Palette, PaletteEvent};
@@ -91,6 +92,7 @@ pub struct Workspace {
     pulse: bool,
     window_title: String,
     palette: Option<Entity<Palette>>,
+    creator: Option<Entity<Creator>>,
     opened: Option<OpenedFile>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
     focus: FocusHandle,
@@ -122,6 +124,7 @@ impl Workspace {
             pulse: true,
             window_title: "SupaCode".into(),
             palette: None,
+            creator: None,
             opened: None,
             focus: cx.focus_handle(),
             watcher: None,
@@ -166,6 +169,20 @@ impl Workspace {
                     this.toggle_palette(window, cx);
                     if let Some(palette) = this.palette.clone() {
                         palette.update(cx, |palette, cx| palette.set_query(&query, window, cx));
+                    }
+                });
+            });
+            this._tasks.push(task);
+        }
+        // Débogage : `SUPACODE_CREATE=<description>` ouvre « Nouveau workflow » et lance la génération.
+        #[cfg(debug_assertions)]
+        if let Ok(description) = std::env::var("SUPACODE_CREATE") {
+            let task = cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(2500)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.open_creator(window, cx);
+                    if let Some(creator) = this.creator.clone() {
+                        creator.update(cx, |creator, cx| creator.debug_generate(&description, window, cx));
                     }
                 });
             });
@@ -476,6 +493,7 @@ impl Workspace {
         }
         let mut commands = vec![
             palette::Item::Command { label: "Nouvelle conversation".into(), hint: None, command: palette::Command::NewConversation },
+            palette::Item::Command { label: "Nouveau workflow…".into(), hint: None, command: palette::Command::NewWorkflow },
             palette::Item::Command { label: "Ajouter un projet".into(), hint: None, command: palette::Command::AddProject },
         ];
         if let (Some(project), Ok(workflows)) = (self.current_project(), &self.workflows) {
@@ -530,6 +548,7 @@ impl Workspace {
             }
             palette::Item::Command { command, .. } => match command {
                 palette::Command::NewConversation => self.new_conversation(None, window, cx),
+                palette::Command::NewWorkflow => self.open_creator(window, cx),
                 palette::Command::AddProject => self.add_project(cx),
                 palette::Command::RunWorkflow(path, file) => {
                     self.run_workflow(path, file, cx);
@@ -537,6 +556,30 @@ impl Workspace {
                 }
             },
         }
+    }
+
+    /// Fenêtre « Nouveau workflow » pour le projet courant.
+    fn open_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.current_project() else {
+            self.add_project(cx);
+            return;
+        };
+        let creator = cx.new(|cx| Creator::new(project.path.clone(), project.name.clone(), window, cx));
+        cx.subscribe_in(&creator, window, |this, _, event: &CreatorEvent, window, cx| {
+            this.creator = None;
+            if let CreatorEvent::Created(id) = event {
+                this.workflows_open = true;
+                this.load_workflows(cx);
+                if let Some(project) = this.current_project() {
+                    this.open_file(&project.path, format!(".supacode/workflows/{id}.json"), cx);
+                }
+            }
+            this.refocus(window, cx);
+            cx.notify();
+        })
+        .detach();
+        self.creator = Some(creator);
+        cx.notify();
     }
 
     /// Rend le clavier à la conversation active.
@@ -595,6 +638,9 @@ impl Render for Workspace {
                 .pt(px(96.0))
                 .child(palette)
         });
+        let creator = self.creator.clone().map(|creator| {
+            div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(84.0)).child(creator)
+        });
         div()
             .size_full()
             .relative()
@@ -625,6 +671,7 @@ impl Render for Workspace {
             )
             .child(self.render_status(cx))
             .children(overlay)
+            .children(creator)
     }
 }
 
@@ -816,7 +863,25 @@ impl Workspace {
         match &self.workflows {
             Err(error) => body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.err).child(format!("✖ {error}"))),
             Ok(list) if list.is_empty() => {
-                body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.text3).child("Aucun workflow dans .supacode/workflows"));
+                body = body.child(
+                    div()
+                        .px_1p5()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_size(px(12.0))
+                        .text_color(T.text3)
+                        .child("Aucun workflow dans ce projet.")
+                        .child(
+                            div()
+                                .id("create-workflow")
+                                .text_color(T.accent)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))
+                                .child("Décrire un workflow…"),
+                        ),
+                );
             }
             Ok(list) => {
                 let project = self.current_project().map(|p| p.path);
@@ -924,7 +989,23 @@ impl Workspace {
                     }))
                     .child(icon(if self.workflows_open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }).size(px(12.0)).text_color(T.text3))
                     .child(section_label("Workflows").flex_1())
-                    .child(div().text_size(px(11.0)).text_color(T.text3).child(count.to_string())),
+                    .child(div().text_size(px(11.0)).text_color(T.text3).child(count.to_string()))
+                    .child(
+                        div()
+                            .id("new-workflow")
+                            .size(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .text_color(T.text3)
+                            .hover(|d| d.bg(T.raised).text_color(T.text))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_creator(window, cx);
+                            }))
+                            .child(icon(icons::PLUS).size(px(12.0))),
+                    ),
             )
             .when(self.workflows_open, |d| d.child(body))
     }

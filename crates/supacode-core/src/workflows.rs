@@ -93,6 +93,23 @@ pub fn load_workflows(project: &Path) -> Result<Vec<WorkflowFile>> {
         .collect()
 }
 
+/// Enregistre un nouveau workflow sous `.supacode/workflows/<id>.json` sans écraser l'existant
+/// (`<id>-2`, `<id>-3`… si besoin) ; renvoie l'id retenu.
+pub fn save_workflow(project: &Path, id: &str, workflow: &Workflow) -> Result<String> {
+    let dir = project.join(".supacode").join("workflows");
+    fs::create_dir_all(&dir).with_context(|| format!("impossible de créer {}", dir.display()))?;
+    let mut candidate = id.to_owned();
+    let mut n = 2;
+    while dir.join(format!("{candidate}.json")).exists() {
+        candidate = format!("{id}-{n}");
+        n += 1;
+    }
+    let text = serde_json::to_string_pretty(workflow)? + "
+";
+    fs::write(dir.join(format!("{candidate}.json")), text).context("écriture du workflow impossible")?;
+    Ok(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +130,10 @@ mod tests {
         assert_eq!(labels, ["commit", "save src/**/*.ts"]);
         assert_eq!(Trigger::Named("manual".into()).label(), "manuel");
         assert!(load_workflows(&dir.join("absent")).unwrap().is_empty());
+        // Un nouveau workflow du même nom ne remplace pas l'existant.
+        let id = save_workflow(&dir, "verifs", &files[0].workflow).unwrap();
+        assert_eq!(id, "verifs-2");
+        assert_eq!(load_workflows(&dir).unwrap().len(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 }

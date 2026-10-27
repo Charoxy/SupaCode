@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod claude;
 pub mod engine;
+pub mod generate;
 pub mod process;
 pub mod router;
 pub mod time;

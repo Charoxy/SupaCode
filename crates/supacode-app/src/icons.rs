@@ -23,6 +23,7 @@ pub const BRANCH: &str = svg!(r#"<circle stroke-width="1.4" cx="5" cy="3.5" r="1
 pub const CHECK: &str = svg!(r#"<path stroke-width="2" d="M3.5 8.5l3 3 6-7"/>"#);
 pub const UNDO: &str = svg!(r#"<path d="M3 6h7a3 3 0 0 1 0 6H6"/><path d="M5.5 3.5L3 6l2.5 2.5"/>"#);
 pub const SEARCH: &str = svg!(r#"<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>"#);
+pub const BOLT: &str = svg!(r#"<path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z"/>"#);
 pub const PLAY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2.5v11l9-5.5z"/></svg>"#;
 pub const WORKFLOW: &str = svg!(r#"<rect stroke-width="1.4" x="2" y="2" width="5" height="4" rx="1"/><rect stroke-width="1.4" x="9" y="10" width="5" height="4" rx="1"/><path stroke-width="1.4" d="M4.5 6v3a2 2 0 0 0 2 2H9"/>"#);
 pub const APPROVE: &str = svg!(r#"<circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/>"#);

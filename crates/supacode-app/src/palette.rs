@@ -25,6 +25,7 @@ const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", "out", "bui
 #[derive(Clone)]
 pub enum Command {
     NewConversation,
+    NewWorkflow,
     AddProject,
     RunWorkflow(PathBuf, WorkflowFile),
 }
