@@ -72,7 +72,12 @@ enum PreviewMode {
 }
 
 pub struct Workspace {
+    /// Projets ajoutés par l'utilisateur (avec leurs conversations Claude Code).
     projects: Vec<Project>,
+    /// Projets connus de Claude Code pas encore ajoutés : proposés à l'ajout.
+    suggestions: Vec<Project>,
+    /// Liste « Ajouter un projet » ouverte dans la barre latérale.
+    adding: bool,
     expanded: HashSet<String>,
     show_all: HashSet<String>,
     conversations: HashMap<String, Vec<Conversation>>,
@@ -110,6 +115,8 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             projects: Vec::new(),
+            suggestions: Vec::new(),
+            adding: false,
             expanded: HashSet::new(),
             show_all: HashSet::new(),
             conversations: HashMap::new(),
@@ -237,21 +244,32 @@ impl Workspace {
 
     fn refresh_projects(&mut self, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
-            let projects = cx
+            let (projects, suggestions) = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut projects = claude::projects_dir().map(|d| claude::list_projects(&d)).unwrap_or_default();
-                    // Dossiers ajoutés à la main qui n'ont pas encore de conversation.
-                    for path in added_projects() {
-                        if path.exists() && !projects.iter().any(|p| same_path(&p.path, &path)) {
-                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            projects.insert(0, Project { id: String::new(), path, name, last_activity: SystemTime::UNIX_EPOCH, conversation_count: 0 });
-                        }
-                    }
-                    projects
+                    let known = claude::projects_dir().map(|d| claude::list_projects(&d)).unwrap_or_default();
+                    let added = added_projects();
+                    let mut projects: Vec<Project> = added
+                        .iter()
+                        .filter(|path| path.exists())
+                        .map(|path| {
+                            // Conversations Claude Code du dossier, s'il en a.
+                            known.iter().find(|p| same_path(&p.path, path)).cloned().unwrap_or_else(|| Project {
+                                id: String::new(),
+                                path: path.clone(),
+                                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                                last_activity: SystemTime::UNIX_EPOCH,
+                                conversation_count: 0,
+                            })
+                        })
+                        .collect();
+                    projects.sort_by_key(|p| std::cmp::Reverse(p.last_activity));
+                    let suggestions = known.into_iter().filter(|p| !added.iter().any(|a| same_path(a, &p.path))).collect::<Vec<_>>();
+                    (projects, suggestions)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.suggestions = suggestions;
                 if this.expanded.is_empty() {
                     if let Some(first) = projects.first() {
                         this.expanded.insert(project_key(first));
@@ -531,16 +549,36 @@ impl Workspace {
         self._tasks.push(task);
     }
 
+    /// Ajoute un dossier à la liste (sans rien créer ni modifier dedans).
+    fn add_project_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        save_added_project(&path);
+        let key = path.display().to_string().to_lowercase();
+        self.expanded.insert(key.clone());
+        self.selected_project = Some(key);
+        self.adding = false;
+        self.refresh_projects(cx);
+    }
+
+    /// Retire le projet de la liste ; le dossier et ses conversations restent intacts.
+    fn remove_project(&mut self, project: &Project, cx: &mut Context<Self>) {
+        remove_added_project(&project.path);
+        let key = project_key(project);
+        self.expanded.remove(&key);
+        if self.selected_project.as_ref() == Some(&key) {
+            self.selected_project = None;
+        }
+        self.projects.retain(|p| project_key(p) != key);
+        self.refresh_projects(cx);
+        cx.notify();
+    }
+
     fn add_project(&mut self, cx: &mut Context<Self>) {
+        self.adding = false;
         let paths = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Ajouter le projet".into()) });
         let task = cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
-            save_added_project(&path);
-            let _ = this.update(cx, |this, cx| {
-                this.expanded.insert(path.display().to_string().to_lowercase());
-                this.refresh_projects(cx);
-            });
+            let _ = this.update(cx, |this, cx| this.add_project_path(path, cx));
         });
         self._tasks.push(task);
     }
@@ -821,7 +859,7 @@ impl Workspace {
                     .flex_col()
                     .gap_1p5()
                     .child(div().font_weight(FontWeight::MEDIUM).child("Aucun projet"))
-                    .child(div().text_size(px(12.0)).text_color(T.text2).child("Ajoute un dossier pour que les agents puissent y travailler.")),
+                    .child(div().text_size(px(12.0)).text_color(T.text2).child("Ajoute tes projets avec « Ajouter un projet » en bas : un dossier de ta machine, ou un projet sur lequel tu as déjà travaillé avec Claude Code.")),
             );
         }
         let active_conversation = self.active_tab().map(|t| t.conversation_id.clone());
@@ -831,9 +869,12 @@ impl Workspace {
             let busy = self.tabs.iter().any(|t| same_path(&t.project.path, &project.path) && is_active(t));
             let selected = self.selected_project.as_ref() == Some(&key);
             let toggle = project.clone();
+            let removed = project.clone();
+            let group = SharedString::from(format!("project-row-{index}"));
             list = list.child(
                 div()
                     .id(("project", index))
+                    .group(group.clone())
                     .h(px(28.0))
                     .flex_shrink_0()
                     .flex()
@@ -862,7 +903,26 @@ impl Workspace {
                                 .justify_center()
                                 .child(project.conversation_count.to_string()),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .id(("project-remove", index))
+                            .size(px(18.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .text_color(T.text3)
+                            .opacity(0.0)
+                            .group_hover(group, |d| d.opacity(1.0))
+                            .hover(|d| d.bg(T.raised).text_color(T.text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_project(&removed, cx);
+                            }))
+                            .child(icon(icons::CLOSE).size(px(11.0))),
+                    ),
             );
             if !open {
                 continue;
@@ -966,7 +1026,7 @@ impl Workspace {
             .child(list)
             .child(self.render_workflows(cx))
             .child(
-                div().border_t_1().border_color(T.border).p_2().child(
+                div().border_t_1().border_color(T.border).p_2().when(self.adding, |d| d.child(self.render_add_menu(cx))).child(
                     div()
                         .id("add-project")
                         .h(px(30.0))
@@ -978,11 +1038,65 @@ impl Workspace {
                         .text_color(T.text2)
                         .cursor_pointer()
                         .hover(|d| d.bg(T.hover))
-                        .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
+                        .when(self.adding, |d| d.bg(T.hover))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.adding = !this.adding;
+                            cx.notify();
+                        }))
                         .child(icon(icons::PLUS).size(px(14.0)))
                         .child("Ajouter un projet"),
                 ),
             )
+    }
+
+    /// Choix du projet à ajouter : un dossier, ou un projet déjà utilisé avec Claude Code.
+    fn render_add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = SystemTime::now();
+        let rows = self.suggestions.iter().take(30).enumerate().map(|(i, project)| {
+            let path = project.path.clone();
+            div()
+                .id(("suggestion-project", i))
+                .h(px(30.0))
+                .flex_shrink_0()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|d| d.bg(T.hover))
+                .on_click(cx.listener(move |this, _, _, cx| this.add_project_path(path.clone(), cx)))
+                .child(icon(icons::FOLDER).size(px(13.0)).text_color(T.text3))
+                .child(div().flex_1().min_w_0().truncate().child(project.name.clone()))
+                .child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(relative(project.last_activity, now)))
+        });
+        div()
+            .mb_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .id("add-folder")
+                    .h(px(30.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.0))
+                    .bg(T.raised)
+                    .border_1()
+                    .border_color(T.border)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
+                    .child(icon(icons::FOLDER).size(px(13.0)).text_color(T.accent))
+                    .child("Ouvrir un dossier…"),
+            )
+            .when(!self.suggestions.is_empty(), |d| {
+                d.child(section_label("Récents dans Claude Code").px_2().pt_2())
+                    .child(div().id("suggestion-list").max_h(px(220.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0)).children(rows))
+            })
     }
 
     fn render_workflows(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -990,6 +1104,9 @@ impl Workspace {
         let mut body = div().id("workflow-list").flex().flex_col().gap(px(2.0)).mt(px(2.0)).max_h(px(220.0)).overflow_y_scroll();
         match &self.workflows {
             Err(error) => body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.err).child(format!("✖ {error}"))),
+            Ok(_) if self.current_project().is_none() => {
+                body = body.child(div().px_1p5().py_1().text_size(px(12.0)).text_color(T.text3).child("Ajoute un projet pour voir ses workflows."));
+            }
             Ok(list) if list.is_empty() => {
                 body = body.child(
                     div()
@@ -1339,6 +1456,36 @@ impl Workspace {
                             .child(div().flex().flex_col().gap(px(2.0)).child(div().font_weight(FontWeight::MEDIUM).child("Ouvrir un dossier")).child(div().text_size(px(12.0)).text_color(T.text2).child("Un projet déjà sur ta machine"))),
                     ),
                 )
+                .when(self.projects.is_empty() && !self.suggestions.is_empty(), |d| {
+                    let cards = self.suggestions.iter().take(6).enumerate().map(|(i, project)| {
+                        let path = project.path.clone();
+                        div()
+                            .id(("welcome-suggestion", i))
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .p_3()
+                            .border_1()
+                            .border_color(T.border)
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover))
+                            .on_click(cx.listener(move |this, _, _, cx| this.add_project_path(path.clone(), cx)))
+                            .child(icon(icons::FOLDER).size(px(14.0)).text_color(T.text2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(project.name.clone()))
+                                    .child(div().truncate().text_size(px(12.0)).text_color(T.text3).child(format!("{} conversation(s)", project.conversation_count))),
+                            )
+                            .child(icon(icons::PLUS).size(px(12.0)).text_color(T.text3))
+                    });
+                    d.child(div().flex().flex_col().gap(px(10.0)).child(section_label("Ajouter un projet récent de Claude Code")).child(div().grid().grid_cols(3).gap_2().children(cards)))
+                })
                 .child(
                     div()
                         .flex()
@@ -1802,6 +1949,13 @@ fn added_projects() -> Vec<PathBuf> {
         .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|text| serde_json::from_str::<Vec<PathBuf>>(&text).ok())
         .unwrap_or_default()
+}
+
+fn remove_added_project(path: &Path) {
+    let Some(file) = added_projects_file() else { return };
+    let mut projects = added_projects();
+    projects.retain(|p| !same_path(p, path));
+    let _ = std::fs::write(file, serde_json::to_string_pretty(&projects).unwrap_or_default());
 }
 
 fn save_added_project(path: &Path) {
