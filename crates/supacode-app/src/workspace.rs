@@ -984,6 +984,7 @@ impl Render for Workspace {
         let creator = self.creator.clone().map(|creator| {
             div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(84.0)).child(creator)
         });
+        let titlebar = self.render_titlebar(window, cx);
         let activity = self.render_activity_bar(cx);
         let browser_shown = self.right == RightPanel::Browser && self.palette.is_none() && self.creator.is_none() && self.editor.is_none();
         if let Some(browser) = &self.browser {
@@ -1032,6 +1033,7 @@ impl Render for Workspace {
             .font_family(theme::UI_FONT)
             .text_size(px(13.0))
             .line_height(px(18.0))
+            .child(titlebar)
             .child(
                 div()
                     .flex_1()
@@ -1278,11 +1280,10 @@ impl Workspace {
             .flex_col()
             .items_center()
             .gap_1()
-            .pt(px(10.0))
+            .pt(px(6.0))
             .bg(T.app)
             .border_r_1()
             .border_color(T.border)
-            .child(div().mb_2().child(icons::logo(24.0)))
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
             .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
@@ -2219,6 +2220,78 @@ impl Workspace {
         div().h(px(36.0)).flex_shrink_0().flex().border_b_1().border_color(T.border).bg(T.panel).child(tabs)
     }
 
+    /// Barre de titre : se glisse pour déplacer la fenêtre, double-clic pour l'agrandir.
+    fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let mut crumbs = div().flex().items_center().gap_1p5().min_w_0().text_size(px(12.0));
+        if let Some(project) = self.current_project() {
+            crumbs = crumbs.child(icon(icons::FOLDER).size(px(12.0)).text_color(T.text3)).child(div().flex_shrink_0().text_color(T.text2).child(project.name));
+            if let Some(tab) = self.active_tab() {
+                crumbs = crumbs.child(icon(icons::CHEVRON_RIGHT).size(px(11.0)).text_color(T.text3)).child(div().min_w_0().truncate().text_color(T.text).child(tab.title.clone()));
+            }
+        }
+        let search = div()
+            .id("titlebar-search")
+            .w(px(320.0))
+            .flex_shrink(1.0)
+            .min_w(px(160.0))
+            .h(px(24.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(T.border)
+            .bg(T.app)
+            .text_size(px(12.0))
+            .text_color(T.text3)
+            .cursor_pointer()
+            .hover(|d| d.border_color(T.border_strong).text_color(T.text2))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)))
+            .child(icon(icons::SEARCH).size(px(12.0)))
+            .child(div().flex_1().min_w_0().truncate().child("Rechercher dans SupaCode…"))
+            .child(div().text_size(px(11.0)).font_family(theme::MONO_FONT).child("Ctrl K"));
+        let control = |id: &'static str, svg: &'static str, area: WindowControlArea, close: bool| {
+            div()
+                .id(id)
+                .w(px(46.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(T.text2)
+                .window_control_area(area)
+                .when(close, |d| d.hover(|d| d.bg(rgb(0xC42B1C)).text_color(rgb(0xFFFFFF))))
+                .when(!close, |d| d.hover(|d| d.bg(T.hover).text_color(T.text)))
+                .child(icon(svg).size(px(14.0)))
+        };
+        let maximized = window.is_maximized();
+        div()
+            .id("titlebar")
+            .h(px(TITLEBAR))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(T.app)
+            .border_b_1()
+            .border_color(T.border)
+            .window_control_area(WindowControlArea::Drag)
+            .child(div().w(px(ACTIVITY_BAR)).flex_shrink_0().flex().justify_center().child(icons::logo(20.0)))
+            .child(div().flex_1().h_full().min_w_0().pl_1().flex().items_center().gap_2().child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child("SupaCode")).child(crumbs))
+            .child(search)
+            // Deux côtés de même largeur : la recherche reste au centre.
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .justify_end()
+                    .child(control("window-min", icons::MINIMIZE, WindowControlArea::Min, false))
+                    .child(control("window-max", if maximized { icons::RESTORE } else { icons::MAXIMIZE }, WindowControlArea::Max, false))
+                    .child(control("window-close", icons::CLOSE, WindowControlArea::Close, true)),
+            )
+    }
+
     fn render_status(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
         let claude_busy = self.any_active();
         div()
@@ -2315,6 +2388,7 @@ fn which(program: &str) -> bool {
 // — Disposition des panneaux (fichier de réglages de SupaCode)
 
 const ACTIVITY_BAR: f32 = 48.0;
+const TITLEBAR: f32 = 36.0;
 const MIN_SIDEBAR: f32 = 200.0;
 const MAX_SIDEBAR: f32 = 520.0;
 const MIN_RIGHT: f32 = 320.0;

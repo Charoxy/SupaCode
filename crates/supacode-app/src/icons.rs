@@ -30,6 +30,9 @@ pub const PLAY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" hei
 pub const WORKFLOW: &str = svg!(r#"<rect stroke-width="1.4" x="2" y="2" width="5" height="4" rx="1"/><rect stroke-width="1.4" x="9" y="10" width="5" height="4" rx="1"/><path stroke-width="1.4" d="M4.5 6v3a2 2 0 0 0 2 2H9"/>"#);
 pub const GLOBE: &str = svg!(r#"<circle stroke-width="1.4" cx="8" cy="8" r="6"/><path stroke-width="1.4" d="M2 8h12M8 2c1.8 2 2.6 4 2.6 6S9.8 12 8 14C6.2 12 5.4 10 5.4 8S6.2 4 8 2z"/>"#);
 pub const CURSOR: &str = svg!(r#"<path stroke-width="1.4" d="M3.5 2.5l9 4.2-3.9 1.3-1.3 3.9z"/><path stroke-width="1.4" d="M8.6 8.6l3.6 3.6"/>"#);
+pub const MINIMIZE: &str = svg!(r#"<path stroke-width="1.2" d="M3.5 8h9"/>"#);
+pub const MAXIMIZE: &str = svg!(r#"<rect stroke-width="1.2" x="3.5" y="3.5" width="9" height="9" rx="1"/>"#);
+pub const RESTORE: &str = svg!(r#"<rect stroke-width="1.2" x="3.5" y="5.5" width="7" height="7" rx="1"/><path stroke-width="1.2" d="M5.5 5.5V4.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1"/>"#);
 pub const APPROVE: &str = svg!(r#"<circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/>"#);
 /// Le « S » du logo (posé sur un carré arrondi couleur accent : GPUI dessine les SVG d'une seule couleur).
 const LOGO_S: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13 7.2c-.6-1-1.7-1.5-3-1.5-1.7 0-2.9.9-2.9 2.1 0 2.9 6 1.6 6 4.4 0 1.3-1.3 2.2-3.1 2.2-1.4 0-2.5-.6-3.1-1.6"/></svg>"#;

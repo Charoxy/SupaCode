@@ -46,7 +46,8 @@ fn main() {
         }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.0), px(900.0)), cx))),
-            titlebar: Some(TitlebarOptions { title: Some("SupaCode".into()), ..Default::default() }),
+            // Barre de titre dessinée par SupaCode (voir `Workspace::render_titlebar`).
+            titlebar: Some(TitlebarOptions { title: Some("SupaCode".into()), appears_transparent: true, ..Default::default() }),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx))).expect("ouverture de la fenêtre");
