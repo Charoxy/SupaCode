@@ -87,6 +87,9 @@ L'IDE est une application native en Rust, construite sur GPUI (le moteur d'inter
 | `supacode-core::agents` | `claude -p` (stream-json) et `codex exec --json` ; la demande passe par l'entrée standard. |
 | `supacode-core::generate` | Création d'un workflow à partir d'une description : prompt, vérification de la proposition de Claude, enregistrement. |
 | `supacode-core::edit` | Modifications de structure pour l'éditeur visuel : ajout, déplacement, suppression et renommage d'étapes, déclencheurs. |
+| `supacode-core::policy` | Règles d'équipe (`.supacode/policy.json`) : agents et modèles permis, commandes bloquées, fichiers protégés, budgets ; traduction en interdictions de Claude Code (`--settings`). |
+| `supacode-core::audit` | Journal d'audit en JSONL par mois (`.supacode/journal/`), utilisateur git, export CSV. |
+| `supacode-core::costs` | Grille de prix de l'API Claude ; lecture des transcripts de Claude Code (dépenses dédoublonnées par message, outils utilisés). |
 | `supacode-core::engine` | Moteur de workflows : conditions, parallélisme, validations, `{{variables}}`, `SUPACODE_*`, arrêt. |
 | `supacode-core::process` | Lancement des commandes, lecture ligne à ligne, arrêt de l'arbre de processus. |
 | `supacode-app::terminal` | Terminal intégré (`alacritty_terminal`, ConPTY sous Windows) où tourne la CLI `claude`. |
@@ -102,6 +105,6 @@ GPUI dessine avec DirectComposition par-dessus ses fenêtres enfants : la WebVie
 ## Feuille de route
 
 1. **Fondations** *(fait)* : monorepo TypeScript, cœur avec classifieur, routeur et agents Claude/Codex, CLI `supacode`, CI.
-2. **Moteur de workflows et IDE** *(en cours)* : moteur de workflows dans le cœur, CLI `workflow` et hooks git *(fait)*. IDE natif en Rust : projets et conversations, terminal `claude`, aperçu du code, lancement et suivi des workflows avec validations *(fait)* ; palette Ctrl+K, coloration syntaxique, création de workflows en langage naturel, déclencheur à l'enregistrement *(fait)* ; éditeur visuel de workflows *(fait)* ; navigateur intégré pilotable par les agents, avec sélection et dessin *(fait)* ; diff côte à côte, thème clair *(à venir)*.
+2. **Moteur de workflows et IDE** *(en cours)* : moteur de workflows dans le cœur, CLI `workflow` et hooks git *(fait)*. IDE natif en Rust : projets et conversations, terminal `claude`, aperçu du code, lancement et suivi des workflows avec validations *(fait)* ; palette Ctrl+K, coloration syntaxique, création de workflows en langage naturel, déclencheur à l'enregistrement *(fait)* ; éditeur visuel de workflows *(fait)* ; navigateur intégré pilotable par les agents, avec sélection et dessin *(fait)* ; règles d'équipe, coûts, budgets et journal d'audit *(fait)* ; diff côte à côte, thème clair *(à venir)*.
 3. **Un vrai IDE IA** : éditeur visuel de workflows, création de workflows en langage naturel, diff et application des modifications dans le panneau, historique des exécutions, bibliothèque de workflows prêts à l'emploi, paquets d'installation.
 4. **APK Android** : suivre et piloter le travail à distance (lancer une demande ou un workflow, voir le flux d'événements, valider ou arrêter), grâce à un serveur exposé par le cœur.

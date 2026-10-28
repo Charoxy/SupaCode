@@ -20,12 +20,15 @@ pub enum AgentEvent {
     /// Sortie brute (stderr, lignes non reconnues).
     Log(String),
     Error(String),
+    /// Coût de l'exécution annoncé par l'agent, en dollars.
+    Usage { cost_usd: f64 },
     /// Résultat final.
     Done { summary: Option<String> },
 }
 
 /// Lance l'agent sur `prompt` dans `cwd` ; renvoie le code de sortie (`None` si arrêté).
-pub fn run(agent: AgentId, model: Option<&str>, prompt: &str, cwd: &Path, cancel: &AtomicBool, mut on_event: impl FnMut(AgentEvent)) -> Result<Option<i32>> {
+/// `extra` : options ajoutées à la ligne de commande (règles d'équipe…).
+pub fn run(agent: AgentId, model: Option<&str>, prompt: &str, cwd: &Path, extra: &[String], cancel: &AtomicBool, mut on_event: impl FnMut(AgentEvent)) -> Result<Option<i32>> {
     let mut args: Vec<String> = match agent {
         // `--no-session-persistence` : les étapes de workflow n'encombrent pas la liste des conversations.
         AgentId::Claude => ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits", "--no-session-persistence"].map(Into::into).into(),
@@ -35,6 +38,7 @@ pub fn run(agent: AgentId, model: Option<&str>, prompt: &str, cwd: &Path, cancel
     if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
     }
+    args.extend(extra.iter().cloned());
     if agent == AgentId::Codex {
         // « - » : la demande est lue sur l'entrée standard.
         args.push("-".into());
@@ -113,11 +117,13 @@ pub fn parse_claude_line(line: &str) -> Vec<AgentEvent> {
         Some("result") => {
             let result = str_field(&msg, "result").map(str::to_owned);
             let subtype = str_field(&msg, "subtype");
+            let mut events: Vec<AgentEvent> = msg.get("total_cost_usd").and_then(Value::as_f64).map(|cost_usd| AgentEvent::Usage { cost_usd }).into_iter().collect();
             if msg.get("is_error").and_then(Value::as_bool) == Some(true) || subtype.is_some_and(|s| s != "success") {
-                vec![AgentEvent::Error(result.unwrap_or_else(|| format!("Claude a échoué ({})", subtype.unwrap_or("?"))))]
+                events.push(AgentEvent::Error(result.unwrap_or_else(|| format!("Claude a échoué ({})", subtype.unwrap_or("?")))));
             } else {
-                vec![AgentEvent::Done { summary: result }]
+                events.push(AgentEvent::Done { summary: result });
             }
+            events
         }
         _ => vec![],
     }
@@ -172,6 +178,10 @@ mod tests {
             [AgentEvent::Text("Je lis.".into()), AgentEvent::Tool { name: "Read".into(), detail: Some("src/a.ts".into()) }]
         );
         assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","result":"Fait."}"#), [AgentEvent::Done { summary: Some("Fait.".into()) }]);
+        assert_eq!(
+            parse_claude_line(r#"{"type":"result","subtype":"success","result":"Fait.","total_cost_usd":0.25}"#),
+            [AgentEvent::Usage { cost_usd: 0.25 }, AgentEvent::Done { summary: Some("Fait.".into()) }]
+        );
     }
 
     #[test]

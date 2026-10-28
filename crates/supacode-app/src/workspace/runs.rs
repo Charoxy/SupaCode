@@ -121,6 +121,7 @@ impl WorkflowRun {
                         AgentEvent::Tool { name, detail } => step.push(LineStyle::Done, format!("✓ {name}{}", detail.map(|d| format!(" {d}")).unwrap_or_default())),
                         AgentEvent::Log(text) => step.push(if step.kind == StepKind::Run { LineStyle::Plain } else { LineStyle::Muted }, text),
                         AgentEvent::Error(text) => step.push(LineStyle::Error, text),
+                        AgentEvent::Usage { cost_usd } => step.push(LineStyle::Muted, format!("coût estimé : {cost_usd:.3} $")),
                         AgentEvent::Done { .. } => {}
                     }
                 }
@@ -268,8 +269,27 @@ impl Workspace {
 
         let (tx, rx) = async_channel::unbounded();
         let workflow = file.workflow;
-        let options = RunOptions { cwd: project.clone(), context, cancel };
+        let policy = match self.policy_for(&project) {
+            Ok(policy) => policy,
+            Err(error) => {
+                // Règles illisibles : rien ne tourne tant qu'elles ne sont pas corrigées.
+                self.runs.retain(|r| r.id != id);
+                self.toast(format!("Workflow non lancé, règles d'équipe invalides : {error}"), cx);
+                return;
+            }
+        };
+        let claude_id = self.projects.iter().find(|p| same_path(&p.path, &project)).map(|p| p.id.clone()).unwrap_or_default();
+        let scanner = self.scanner.clone();
+        let root = project.clone();
         std::thread::spawn(move || {
+            // Dépenses du jour et du mois, pour les budgets des règles.
+            let spent = if policy.as_ref().is_some_and(|p| !p.budget.is_empty()) {
+                let totals = super::team::compute(&scanner, &root, &claude_id).totals;
+                engine::Spent { today: totals.today, month: totals.month }
+            } else {
+                engine::Spent::default()
+            };
+            let options = RunOptions { cwd: root, context, cancel, policy, spent, journal: true };
             engine::run(&workflow, &options, &ChannelHost(tx));
         });
 
@@ -308,6 +328,8 @@ impl Workspace {
                     });
                 }
             }
+            // Exécution terminée : coûts et journal à jour.
+            let _ = this.update(cx, |this, cx| this.refresh_team(cx));
         });
         self._tasks.push(task);
         cx.notify();

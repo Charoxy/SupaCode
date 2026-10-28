@@ -2,12 +2,14 @@
 //! variables `SUPACODE_*`, groupes parallèles, validations humaines).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use crate::agents::{self, AgentEvent};
+use crate::audit::{self, kind};
+use crate::policy::Policy;
 use crate::process::{self, Spawn};
 use crate::router::{self, AgentId, OrchestratorConfig};
 use crate::workflows::{Step, Workflow};
@@ -86,11 +88,24 @@ pub trait Host: Send + Sync {
     fn approve(&self, id: &str, message: &str, cancel: &AtomicBool) -> bool;
 }
 
+#[derive(Default)]
 pub struct RunOptions {
     pub cwd: PathBuf,
     /// Variables supplémentaires : `{{file}}`, `{{selection}}`…
     pub context: HashMap<String, String>,
     pub cancel: Arc<AtomicBool>,
+    /// Règles d'équipe du projet.
+    pub policy: Option<Policy>,
+    /// Déjà dépensé (estimation) aujourd'hui et ce mois, pour les budgets.
+    pub spent: Spent,
+    /// Tenir le journal d'audit du projet.
+    pub journal: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Spent {
+    pub today: f64,
+    pub month: f64,
 }
 
 struct StepResult {
@@ -108,6 +123,8 @@ struct Run<'a> {
     /// Groupes parallèles : leur échec est déjà compté via leurs étapes.
     groups: HashSet<String>,
     git: OnceLock<HashMap<String, String>>,
+    /// Coût des étapes d'agent de cette exécution.
+    cost: Mutex<f64>,
 }
 
 /// Toutes les étapes, groupes parallèles compris, à plat.
@@ -135,7 +152,8 @@ pub fn run(workflow: &Workflow, options: &RunOptions, host: &dyn Host) -> RunSta
     }
     let groups = all.iter().filter(|s| s.parallel.is_some()).map(|s| s.id.clone()).collect();
     let config = router::load_config(&options.cwd).unwrap_or_default();
-    let state = Run { options, host, config, results: Mutex::new(Vec::new()), handled, groups, git: OnceLock::new() };
+    let state = Run { options, host, config, results: Mutex::new(Vec::new()), handled, groups, git: OnceLock::new(), cost: Mutex::new(0.0) };
+    state.journal(kind::WORKFLOW, format!("Workflow « {} » lancé", workflow.name), serde_json::json!({ "contexte": options.context }), None);
 
     for step in &workflow.steps {
         if state.cancelled() {
@@ -150,6 +168,13 @@ pub fn run(workflow: &Workflow, options: &RunOptions, host: &dyn Host) -> RunSta
     } else {
         RunStatus::Success
     };
+    let label = match status {
+        RunStatus::Success => "réussi",
+        RunStatus::Failed => "en échec",
+        RunStatus::Cancelled => "arrêté",
+    };
+    let cost = *state.cost.lock().unwrap();
+    state.journal(kind::WORKFLOW, format!("Workflow « {} » {label}", workflow.name), serde_json::Value::Null, (cost > 0.0).then_some(cost));
     host.emit(Event::Done { status });
     status
 }
@@ -183,6 +208,30 @@ impl Run<'_> {
         }
     }
 
+    fn journal(&self, kind: &str, summary: String, details: serde_json::Value, cost: Option<f64>) {
+        if self.options.journal {
+            audit::record(&self.options.cwd, kind, summary, details, cost);
+        }
+    }
+
+    /// Refus des règles d'équipe : l'étape échoue avec ce message.
+    fn refuse(&self, id: &str, message: String) -> (StepStatus, String, Option<i32>) {
+        self.output(id, AgentEvent::Error(message.clone()));
+        self.journal(kind::BLOCKED, message.clone(), serde_json::json!({ "étape": id }), None);
+        (StepStatus::Failed, message, None)
+    }
+
+    /// Budget dépassé ? Message à afficher si oui.
+    fn over_budget(&self) -> Option<String> {
+        let budget = &self.options.policy.as_ref()?.budget;
+        let run = *self.cost.lock().unwrap();
+        let spent = self.options.spent;
+        let over = |limit: Option<f64>, used: f64, label: &str| limit.filter(|l| used >= *l).map(|l| format!("Budget {label} atteint ({used:.2} $ sur {l:.2} $) : étape d'agent refusée par les règles d'équipe"));
+        over(budget.per_run_usd, run, "de l'exécution")
+            .or_else(|| over(budget.daily_usd, spent.today + run, "du jour"))
+            .or_else(|| over(budget.monthly_usd, spent.month + run, "du mois"))
+    }
+
     fn output(&self, id: &str, event: AgentEvent) {
         self.host.emit(Event::Output { id: id.to_owned(), event });
     }
@@ -207,16 +256,26 @@ impl Run<'_> {
             let message = self.render(message);
             self.host.emit(Event::Approval { id: id.clone(), message: message.clone() });
             let approved = self.host.approve(&id, &message, &self.options.cancel);
+            self.journal(kind::APPROVAL, format!("{} : {message}", if approved { "Validé" } else { "Refusé" }), serde_json::json!({ "étape": id }), None);
             (if approved { StepStatus::Success } else { StepStatus::Failed }, if approved { "validé" } else { "refusé" }.to_owned(), None)
         } else {
             let mut output = String::new();
-            let result = if let Some(command) = &step.run {
+            let policy = self.options.policy.as_ref();
+            let blocked = step.run.as_deref().and_then(|command| policy.and_then(|p| p.blocked_command(command)).map(|pattern| (command, pattern)));
+            let result = if let Some((command, pattern)) = blocked {
+                let (status, message, code) = self.refuse(&id, format!("Commande bloquée par les règles d'équipe (« {pattern} ») : {command}"));
+                self.finish(&id, status, message, code);
+                return;
+            } else if let Some(command) = &step.run {
                 let mut spawn = Spawn::shell(command, &self.options.cwd);
                 spawn.env = self.environment();
-                process::run_lines(spawn, &self.options.cancel, |line| {
+                let result = process::run_lines(spawn, &self.options.cancel, |line| {
                     push_tail(&mut output, &line.text);
                     self.output(&id, AgentEvent::Log(line.text));
-                })
+                });
+                let code = result.as_ref().ok().copied().flatten();
+                self.journal(kind::COMMAND, command.clone(), serde_json::json!({ "étape": id, "code": code }), None);
+                result
             } else {
                 let prompt = self.render(step.prompt.as_deref().unwrap_or_default());
                 let forced = match step.agent.as_deref() {
@@ -224,16 +283,70 @@ impl Run<'_> {
                     Some("codex") => Some(AgentId::Codex),
                     _ => None,
                 };
-                let decision = router::route(&prompt, &self.config, forced, step.model.as_deref());
-                self.host.emit(Event::Routed { id: id.clone(), agent: decision.agent, model: decision.model.clone(), reason: decision.reason });
-                agents::run(decision.agent, decision.model.as_deref(), &prompt, &self.options.cwd, &self.options.cancel, |event| {
+                let mut decision = router::route(&prompt, &self.config, forced, step.model.as_deref());
+                if let Some(Err(message)) = policy.map(|p| p.constrain(&mut decision)) {
+                    let (status, message, code) = self.refuse(&id, format!("Étape refusée : {message}"));
+                    self.finish(&id, status, message, code);
+                    return;
+                }
+                if let Some(message) = self.over_budget() {
+                    let (status, message, code) = self.refuse(&id, message);
+                    self.finish(&id, status, message, code);
+                    return;
+                }
+                let (agent, model) = (decision.agent, decision.model.clone());
+                self.host.emit(Event::Routed { id: id.clone(), agent, model: model.clone(), reason: decision.reason });
+                // Claude applique lui-même les interdictions ; pour Codex, on vérifie après coup.
+                let extra: Vec<String> = match (agent, policy.and_then(Policy::claude_settings)) {
+                    (AgentId::Claude, Some(settings)) => vec!["--settings".into(), settings],
+                    _ => Vec::new(),
+                };
+                let (mut tools, mut cost, mut violation) = (Vec::new(), None, None::<String>);
+                let result = agents::run(agent, model.as_deref(), &prompt, &self.options.cwd, &extra, &self.options.cancel, |event| {
                     match &event {
                         AgentEvent::Text(text) => push_tail(&mut output, text),
                         AgentEvent::Done { summary: Some(summary) } => output = summary.clone(),
+                        AgentEvent::Usage { cost_usd } => cost = Some(*cost_usd),
+                        AgentEvent::Tool { name, detail } => {
+                            let detail = detail.clone().unwrap_or_default();
+                            if let Some(p) = policy.filter(|_| agent == AgentId::Codex) {
+                                let broken = if name == "shell" {
+                                    p.blocked_command(&detail).map(|pattern| format!("commande « {detail} » (règle « {pattern} »)"))
+                                } else {
+                                    detail.split(", ").find_map(|file| {
+                                        // Codex donne des chemins absolus : on les ramène au projet.
+                                        let relative = Path::new(file).strip_prefix(&self.options.cwd).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| file.to_owned());
+                                        p.protected_file(&relative).map(|pattern| format!("fichier protégé « {file} » (règle « {pattern} »)"))
+                                    })
+                                };
+                                if let Some(broken) = broken {
+                                    violation.get_or_insert(broken);
+                                }
+                            }
+                            tools.push(serde_json::json!({ "outil": name, "détail": detail }));
+                        }
                         _ => {}
                     }
                     self.output(&id, event);
-                })
+                });
+                if let Some(cost) = cost {
+                    *self.cost.lock().unwrap() += cost;
+                }
+                let model_label = model.clone().unwrap_or_else(|| "modèle par défaut".into());
+                self.journal(
+                    kind::AGENT,
+                    format!("{} ({model_label}) : {}", agent.label(), prompt.chars().take(160).collect::<String>()),
+                    serde_json::json!({ "étape": id, "agent": agent.as_str(), "modèle": model, "outils": tools }),
+                    cost,
+                );
+                match violation {
+                    Some(broken) => {
+                        let (status, message, code) = self.refuse(&id, format!("Codex a enfreint les règles d'équipe : {broken}"));
+                        self.finish(&id, status, message, code);
+                        return;
+                    }
+                    None => result,
+                }
             };
             match result {
                 Ok(code) => (if code == Some(0) { StepStatus::Success } else { StepStatus::Failed }, output, code),
@@ -374,7 +487,7 @@ mod tests {
     }
 
     fn options() -> RunOptions {
-        RunOptions { cwd: std::env::temp_dir(), context: HashMap::from([("nom".into(), "monde".into())]), cancel: Arc::default() }
+        RunOptions { cwd: std::env::temp_dir(), context: HashMap::from([("nom".into(), "monde".into())]), ..Default::default() }
     }
 
     #[test]
@@ -398,6 +511,35 @@ mod tests {
             _ => None,
         });
         assert_eq!(message.as_deref().map(str::trim), Some("bonjour monde {{inconnu}}"));
+    }
+
+    #[test]
+    fn regles_d_equipe() {
+        let root = std::env::temp_dir().join(format!("supacode-regles-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let wf = workflow(
+            r#"{"name":"t","steps":[
+                {"id":"pousse","run":"echo ok && git push --force"},
+                {"id":"apres","run":"echo apres"},
+                {"id":"agent","if":"always","prompt":"Corrige"}
+            ]}"#,
+        );
+        let policy = crate::policy::Policy {
+            blocked_commands: vec!["git push --force*".into()],
+            budget: crate::policy::Budget { daily_usd: Some(10.0), ..Default::default() },
+            ..Default::default()
+        };
+        let options = RunOptions { cwd: root.clone(), policy: Some(policy), spent: Spent { today: 12.0, month: 12.0 }, journal: true, ..Default::default() };
+        let host = Recorder { events: Mutex::default(), answer: true };
+        assert_eq!(run(&wf, &options, &host), RunStatus::Failed);
+        // Bloquée avant de tourner, la suite est sautée, et le budget du jour refuse l'agent sans le lancer.
+        assert_eq!(statuses(&host), [("pousse".into(), StepStatus::Failed), ("apres".into(), StepStatus::Skipped), ("agent".into(), StepStatus::Failed)]);
+        let journal = audit::read(&root);
+        let blocked: Vec<_> = journal.iter().filter(|e| e.kind == kind::BLOCKED).map(|e| e.summary.clone()).collect();
+        assert_eq!(blocked.len(), 2, "{blocked:?}");
+        assert!(blocked[1].contains("Budget du jour"));
+        assert!(journal.iter().all(|e| e.kind != kind::COMMAND), "la commande bloquée n'a pas tourné");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

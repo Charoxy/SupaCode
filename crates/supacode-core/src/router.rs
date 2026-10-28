@@ -21,6 +21,14 @@ impl AgentId {
             AgentId::Codex => "Codex",
         }
     }
+
+    /// Nom de la CLI, tel qu'écrit dans les fichiers de configuration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentId::Claude => "claude",
+            AgentId::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

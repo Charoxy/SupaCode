@@ -24,8 +24,12 @@ use crate::terminal::{Command, TerminalEvent, TerminalView};
 use crate::theme::{self, DARK as T};
 
 mod runs;
+mod team;
 
 use runs::WorkflowRun;
+use supacode_core::audit::{self, kind};
+use supacode_core::costs::Scanner;
+use team::{JournalFilter, TeamData};
 
 /// Conversations affichées par projet avant « Voir plus ».
 const PAGE: usize = 6;
@@ -54,6 +58,7 @@ struct Tab {
 enum SidebarTab {
     Projects,
     Workflows,
+    Team,
 }
 
 /// Séparateur glissé entre deux panneaux.
@@ -91,6 +96,8 @@ enum RightPanel {
     Run(usize),
     /// Navigateur intégré.
     Browser,
+    /// Journal d'audit du projet.
+    Journal,
     /// Fichier ouvert depuis la palette.
     File,
 }
@@ -147,6 +154,12 @@ pub struct Workspace {
     editor: Option<Entity<Editor>>,
     opened: Option<OpenedFile>,
     browser: Option<Entity<BrowserView>>,
+    /// Règles, coûts et journal du projet (onglet Équipe).
+    team: TeamData,
+    scanner: std::sync::Arc<std::sync::Mutex<Scanner>>,
+    journal_filter: JournalFilter,
+    /// Message bref dans la barre d'état.
+    toast: Option<(SharedString, Instant)>,
     /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
     mcp_config: Option<PathBuf>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
@@ -191,6 +204,10 @@ impl Workspace {
             palette: None,
             creator: None,
             browser: None,
+            team: TeamData::default(),
+            scanner: Default::default(),
+            journal_filter: JournalFilter::All,
+            toast: None,
             mcp_config: None,
             editor: None,
             opened: None,
@@ -202,6 +219,7 @@ impl Workspace {
         };
         this.refresh_projects(cx);
         this.start_mcp(window, cx);
+        this.watch_team(cx);
         window.focus(&this.focus, cx);
 
         // Animation « en cours » (jeton `pulse` : 700 ms) et actualisation de la liste.
@@ -377,6 +395,7 @@ impl Workspace {
         };
         self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
         self.watch_saves(project.path, cx);
+        self.refresh_team(cx);
         cx.notify();
     }
 
@@ -513,8 +532,27 @@ impl Workspace {
         // Une nouvelle conversation reçoit son identifiant tout de suite : son titre réel
         // remplacera « Nouvelle conversation » dès que Claude Code l'aura enregistrée.
         let session = conversation.as_ref().map(|c| c.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let policy = match self.policy_for(&project.path) {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.toast(format!("Conversation non ouverte, règles d'équipe invalides : {error}"), cx);
+                return;
+            }
+        };
+        if policy.as_ref().is_some_and(|p| !p.agent_allowed(supacode_core::router::AgentId::Claude)) {
+            self.toast("Les règles d'équipe de ce projet n'autorisent pas Claude.", cx);
+            return;
+        }
         let mut args = Vec::new();
-        if let Some(config) = &self.mcp_config {
+        if let Some(settings) = policy.as_ref().and_then(|p| p.claude_settings()) {
+            args.extend(["--settings".to_owned(), settings]);
+        }
+        // Modèles restreints : le premier modèle Claude permis.
+        if let Some(model) = policy.as_ref().and_then(|p| p.models.iter().find(|m| m.starts_with("claude") && !m.contains('*')).cloned()) {
+            args.extend(["--model".to_owned(), model]);
+        }
+        let browser_allowed = policy.as_ref().is_none_or(|p| p.browser);
+        if let Some(config) = self.mcp_config.as_ref().filter(|_| browser_allowed) {
             // Les deux options prennent plusieurs valeurs : chacune doit être suivie d'une autre option.
             args.extend(["--mcp-config".to_owned(), config.display().to_string(), "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
         }
@@ -522,6 +560,16 @@ impl Workspace {
             Some(_) => ["--resume".to_owned(), session.clone()],
             None => ["--session-id".to_owned(), session.clone()],
         });
+        audit::record(
+            &project.path,
+            kind::CONVERSATION,
+            match &conversation {
+                Some(c) => format!("Conversation reprise : {}", c.title),
+                None => format!("Nouvelle conversation{}", prompt.as_deref().map(|p| format!(" : {}", p.chars().take(160).collect::<String>())).unwrap_or_default()),
+            },
+            serde_json::json!({ "conversation": session }),
+            None,
+        );
         args.extend(prompt);
         let command = Command { program: "claude".into(), args, cwd: project.path.clone() };
         let terminal = cx.new(|cx| TerminalView::new(command, window, cx));
@@ -833,7 +881,15 @@ impl Workspace {
         let calls = server.calls;
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(call) = calls.recv().await {
-                let Ok(browser) = this.update_in(cx, |this, window, cx| this.ensure_browser(window, cx).downgrade()) else { break };
+                let Ok(browser) = this.update_in(cx, |this, window, cx| {
+                    if let Some(project) = this.current_project() {
+                        let args = call.args.to_string();
+                        audit::record(&project.path, kind::BROWSER, format!("Agent : {} {}", call.tool, args.chars().take(200).collect::<String>()), serde_json::Value::Null, None);
+                    }
+                    this.ensure_browser(window, cx).downgrade()
+                }) else {
+                    break;
+                };
                 cx.spawn(async move |cx| {
                     let result = browser::call_tool(browser, &call.tool, call.args, cx).await;
                     let _ = call.reply.send(result).await;
@@ -905,6 +961,9 @@ impl Workspace {
             if saved.is_ok() {
                 text.push_str(&format!("\nCapture d'écran annotée : {}\n", dir.join(&name).display()));
             }
+        }
+        if let Some(project) = self.current_project() {
+            audit::record(&project.path, kind::BROWSER, format!("Retour envoyé à l'agent : {}", feedback.text.lines().nth(2).unwrap_or_default()), serde_json::Value::Null, None);
         }
         #[cfg(debug_assertions)]
         if std::env::var_os("SUPACODE_FEEDBACK_LOG").is_some() {
@@ -1219,14 +1278,19 @@ impl Workspace {
         let body = match self.sidebar_tab {
             SidebarTab::Projects => projects_tab.into_any_element(),
             SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
+            SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
         let (title, count) = match self.sidebar_tab {
             SidebarTab::Projects => ("Projets", self.projects.len()),
             SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
+            SidebarTab::Team => ("Équipe", 0),
         };
 
         div()
             .w(px(self.layout.sidebar))
+            .min_w(px(self.layout.sidebar))
+            .max_w(px(self.layout.sidebar))
+            .overflow_hidden()
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -1286,6 +1350,7 @@ impl Workspace {
             .border_color(T.border)
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
+            .child(self.activity_button("activity-team", icons::SHIELD, SidebarTab::Team, self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED), cx))
             .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
             .child({
                 let selected = self.browser.is_some() && self.right == RightPanel::Browser;
@@ -1324,6 +1389,9 @@ impl Workspace {
                 // L'onglet déjà ouvert : replie la barre latérale.
                 this.sidebar_open = !(this.sidebar_open && this.sidebar_tab == tab);
                 this.sidebar_tab = tab;
+                if tab == SidebarTab::Team {
+                    this.refresh_team(cx);
+                }
                 this.adding = false;
                 this.picking_project = false;
                 cx.notify();
@@ -1849,6 +1917,9 @@ impl Workspace {
 
     fn render_right(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let panel = div().w(px(self.layout.right)).min_w(px(self.layout.right)).max_w(px(self.layout.right)).overflow_hidden().flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
+        if self.right == RightPanel::Journal {
+            return Some(panel.child(self.render_journal(cx)));
+        }
         if self.right == RightPanel::Browser {
             if let Some(browser) = self.browser.clone() {
                 return Some(panel.child(self.render_right_tabs(None, cx)).child(div().flex_1().min_h_0().child(browser)));
@@ -2294,7 +2365,7 @@ impl Workspace {
             )
     }
 
-    fn render_status(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_status(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let claude_busy = self.any_active();
         div()
             .h(px(26.0))
@@ -2322,7 +2393,31 @@ impl Workspace {
             .child(div().flex().gap_1().child(div().text_color(T.codex).child("Codex")).child(if self.codex_installed { "○ prêt" } else { "non installé" }))
             .when_some(self.current_run(), |d, run| d.child(div().w(px(1.0)).h(px(14.0)).bg(T.border)).child(self.render_run_status(run)))
             .child(div().flex_1())
-            .child(div().text_color(T.text3).child(format!("{} conversation(s) ouverte(s)", self.tabs.len())))
+            .when_some(self.toast.clone(), |d, (text, _)| d.child(div().min_w_0().truncate().text_color(T.warn).child(text)))
+            .when(self.team.root.is_some(), |d| {
+                let today = self.team.totals.today;
+                let limit = self.team.policy.as_ref().and_then(|p| p.as_ref().ok()).and_then(|p| p.budget.daily_usd);
+                let over = limit.is_some_and(|l| today >= l);
+                let text = match limit {
+                    Some(l) => format!("{:.2} $ / {:.2} $ aujourd'hui", today, l),
+                    None => format!("{today:.2} $ aujourd'hui"),
+                };
+                d.child(
+                    div()
+                        .id("status-cost")
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .text_color(if over { T.err } else { T.text3 })
+                        .hover(|d| d.text_color(T.text))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar_tab = SidebarTab::Team;
+                            this.sidebar_open = true;
+                            cx.notify();
+                        }))
+                        .child(text.replace('.', ",")),
+                )
+            })
+            .child(div().flex_shrink_0().text_color(T.text3).child(format!("{} conversation(s) ouverte(s)", self.tabs.len())))
     }
 }
 
