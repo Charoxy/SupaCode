@@ -76,6 +76,10 @@ pub const DEBOUNCE: Duration = Duration::from_millis(300);
 
 fn is_ignored(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else { return true };
+    // Dossiers de travail de SupaCode : journal, copies des tâches, captures du navigateur.
+    if [".supacode/journal", ".supacode/worktrees", ".supacode/captures"].iter().any(|dir| relative.starts_with(dir)) {
+        return true;
+    }
     relative.components().any(|c| IGNORED.iter().any(|name| c.as_os_str() == *name))
 }
 

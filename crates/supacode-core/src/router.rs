@@ -321,7 +321,7 @@ pub fn load_config(project: &Path) -> Result<OrchestratorConfig> {
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(base);
     };
-    let file: ConfigFile = serde_json::from_str(&text).with_context(|| format!("configuration invalide dans {}", path.display()))?;
+    let file: ConfigFile = serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| format!("configuration invalide dans {}", path.display()))?;
     let Some(user) = file.orchestrator else {
         return Ok(base);
     };

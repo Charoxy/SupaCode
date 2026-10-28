@@ -51,7 +51,7 @@ pub fn relative_path(id: &str) -> String {
 }
 
 pub fn parse(id: &str, text: &str) -> PromptFile {
-    let text = text.replace("\r\n", "\n");
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let (header, body) = match text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) {
         Some((header, rest)) => (header.to_owned(), rest.strip_prefix('\n').unwrap_or(rest).trim_start_matches('\n').to_owned()),
         None => (String::new(), text.clone()),

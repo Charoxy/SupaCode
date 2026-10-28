@@ -23,6 +23,10 @@ pub struct AskDialog {
     submit: SharedString,
     /// Clé, libellé, champ.
     fields: Vec<(String, String, Entity<TextareaState>)>,
+    /// Choix proposés (valeur, libellé) ; la valeur choisie part sous la clé `choix`.
+    choices: Vec<(String, String)>,
+    choice: usize,
+    choices_label: SharedString,
 }
 
 impl AskDialog {
@@ -40,11 +44,21 @@ impl AskDialog {
         if let Some((_, _, first)) = fields.first() {
             first.update(cx, |f, cx| f.focus(window, cx));
         }
-        Self { title: title.into(), subtitle: subtitle.map(Into::into), submit: submit.into(), fields }
+        Self { title: title.into(), subtitle: subtitle.map(Into::into), submit: submit.into(), fields, choices: Vec::new(), choice: 0, choices_label: SharedString::default() }
+    }
+
+    /// Ajoute une liste de choix (le premier est sélectionné).
+    pub fn with_choices(mut self, label: &str, choices: Vec<(String, String)>) -> Self {
+        self.choices = choices;
+        self.choices_label = label.to_owned().into();
+        self
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        let values = self.fields.iter().map(|(key, _, state)| (key.clone(), state.read(cx).value().trim().to_owned())).collect();
+        let mut values: HashMap<String, String> = self.fields.iter().map(|(key, _, state)| (key.clone(), state.read(cx).value().trim().to_owned())).collect();
+        if let Some((value, _)) = self.choices.get(self.choice) {
+            values.insert("choix".into(), value.clone());
+        }
         cx.emit(AskEvent::Submit(values));
     }
 }
@@ -90,7 +104,36 @@ impl Render for AskDialog {
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(self.title.clone()))
                     .when_some(self.subtitle.clone(), |d, s| d.child(div().text_size(px(12.0)).text_color(T.text3).child(s))),
             )
-            .child(div().px_5().py_4().flex().flex_col().gap_3().children(fields))
+            .child(div().px_5().py_4().flex().flex_col().gap_3().children(fields).when(!self.choices.is_empty(), |d| {
+                let chips = self.choices.iter().enumerate().map(|(i, (_, label))| {
+                    let selected = i == self.choice;
+                    div()
+                        .id(("ask-choice", i))
+                        .h(px(28.0))
+                        .px_2p5()
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.0))
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .border_1()
+                        .when(selected, |d| d.bg(T.accent_bg).border_color(T.accent_bg).text_color(T.accent_on))
+                        .when(!selected, |d| d.border_color(T.border).text_color(T.text2).hover(|d| d.bg(T.hover)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choice = i;
+                            cx.notify();
+                        }))
+                        .child(label.clone())
+                });
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1p5()
+                        .child(div().text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(T.text2).child(self.choices_label.clone()))
+                        .child(div().flex().flex_wrap().gap_1p5().children(chips)),
+                )
+            }))
             .child(
                 div()
                     .px_5()

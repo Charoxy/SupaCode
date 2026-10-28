@@ -25,14 +25,21 @@ use crate::theme::{self, DARK as T};
 
 mod extensions;
 mod prompts;
+mod review;
 mod runs;
+mod tasks;
 mod team;
 
 use runs::WorkflowRun;
 use supacode_core::audit::{self, kind};
 use supacode_core::costs::Scanner;
 use extensions::{ExtTab, Extensions};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use prompts::{Pending, PromptView};
+use review::LineComment;
+use supacode_core::git::Checkpoint;
+use tasks::{AgentTask, TaskFile, TaskGroup};
 use supacode_core::prompts::PromptFile;
 use team::{JournalFilter, TeamData};
 
@@ -64,6 +71,7 @@ enum SidebarTab {
     Projects,
     Workflows,
     Prompts,
+    Tasks,
     Extensions,
     Team,
 }
@@ -107,6 +115,8 @@ enum RightPanel {
     Journal,
     /// Prompt de la bibliothèque (`prompt_view`).
     Prompt,
+    /// Tâche (ou comparaison) en arrière-plan.
+    Tasks(usize),
     /// Fichier ouvert depuis la palette.
     File,
 }
@@ -122,6 +132,8 @@ struct OpenedFile {
 enum PreviewMode {
     File,
     Diff,
+    /// Avant / après côte à côte.
+    Split,
 }
 
 pub struct Workspace {
@@ -176,6 +188,17 @@ pub struct Workspace {
     ask: Option<(Entity<crate::ask::AskDialog>, Pending)>,
     /// Skills et serveurs MCP.
     extensions: Extensions,
+    /// Tâches en arrière-plan, regroupées par demande.
+    tasks: Vec<AgentTask>,
+    task_groups: Vec<TaskGroup>,
+    next_task_id: usize,
+    task_file: Option<TaskFile>,
+    /// Points de retour de la conversation active.
+    checkpoints_open: bool,
+    checkpoint_list: Vec<Checkpoint>,
+    /// Ligne commentée dans le panneau de code, et son champ.
+    line_comment: Option<LineComment>,
+    comment_input: Entity<InputState>,
     /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
     mcp_config: Option<PathBuf>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
@@ -228,6 +251,23 @@ impl Workspace {
             prompt_view: None,
             ask: None,
             extensions: Extensions::new(window, cx),
+            tasks: Vec::new(),
+            task_groups: Vec::new(),
+            next_task_id: 0,
+            task_file: None,
+            checkpoints_open: false,
+            checkpoint_list: Vec::new(),
+            line_comment: None,
+            comment_input: {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("Ce que l'agent doit changer ici… (Entrée pour envoyer)"));
+                cx.subscribe_in(&input, window, |this: &mut Self, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.send_line_comment(window, cx);
+                    }
+                })
+                .detach();
+                input
+            },
             mcp_config: None,
             editor: None,
             opened: None,
@@ -599,8 +639,13 @@ impl Workspace {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         cx.subscribe(&terminal, move |this, _, event, cx| {
+            if matches!(event, TerminalEvent::Submitted) {
+                this.take_checkpoint(id, cx);
+                return;
+            }
             let Some(tab) = this.tabs.iter_mut().find(|t| t.id == id) else { return };
             match event {
+                TerminalEvent::Submitted => {}
                 TerminalEvent::Output => tab.last_output = Some(Instant::now()),
                 // La conversation vient d'être enregistrée par Claude Code : on rafraîchit la liste.
                 TerminalEvent::Exited => this.refresh_projects(cx),
@@ -618,6 +663,9 @@ impl Workspace {
     fn activate(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = Some(id);
         self.workflow_project = None;
+        self.checkpoints_open = false;
+        self.line_comment = None;
+        self.checkpoint_list = self.tabs.iter().find(|t| t.id == id).map(|t| supacode_core::git::checkpoints(&t.project.path, &t.conversation_id)).unwrap_or_default();
         self.right = RightPanel::Code;
         self.confirm_revert = false;
         if let Some(tab) = self.active_tab() {
@@ -1284,6 +1332,7 @@ impl Workspace {
             SidebarTab::Projects => projects_tab.into_any_element(),
             SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
             SidebarTab::Prompts => self.render_prompts(cx).into_any_element(),
+            SidebarTab::Tasks => self.render_tasks(cx).into_any_element(),
             SidebarTab::Extensions => self.render_extensions(cx).into_any_element(),
             SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
@@ -1293,6 +1342,7 @@ impl Workspace {
             SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
             SidebarTab::Prompts => ("Prompts", self.prompts.as_ref().map(|p| p.len()).unwrap_or(0)),
             SidebarTab::Extensions => ("Extensions", 0),
+            SidebarTab::Tasks => ("Tâches", self.tasks.iter().filter(|t| t.running()).count()),
             SidebarTab::Team => ("Équipe", 0),
         };
 
@@ -1387,6 +1437,7 @@ impl Workspace {
                 .child(add_project("Projet", false)),
             SidebarTab::Workflows => row.child(primary("new-workflow", "Nouveau workflow").on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))),
             SidebarTab::Prompts => row.child(primary("new-prompt", "Nouveau prompt").on_click(cx.listener(|this, _, _, cx| this.new_prompt(cx)))),
+            SidebarTab::Tasks => row.child(primary("new-task", "Nouvelle tâche").on_click(cx.listener(|this, _, window, cx| this.open_task_dialog(window, cx)))),
             SidebarTab::Extensions => row.child(primary("add-skills", "Ajouter des skills").on_click(cx.listener(|this, _, window, cx| {
                 this.extensions.tab = ExtTab::Library;
                 this.extensions.query.update(cx, |q, cx| q.focus(window, cx));
@@ -1420,6 +1471,7 @@ impl Workspace {
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
             .child(self.activity_button("activity-prompts", icons::QUOTE, SidebarTab::Prompts, false, cx))
+            .child(self.activity_button("activity-tasks", icons::LAYERS, SidebarTab::Tasks, self.tasks.iter().any(|t| t.running()), cx))
             .child(self.activity_button("activity-extensions", icons::PUZZLE, SidebarTab::Extensions, false, cx))
             .child(self.activity_button("activity-team", icons::SHIELD, SidebarTab::Team, self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED), cx))
             .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
@@ -1809,25 +1861,46 @@ impl Workspace {
                             .child(icon(icons::CLAUDE).size(px(11.0)))
                             .child("Claude"),
                     )
-                    .child(div().max_w(px(260.0)).truncate().text_size(px(12.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(cwd))
+                    .child(div().min_w_0().max_w(px(260.0)).truncate().text_size(px(12.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(cwd))
+                    // Icônes avec infobulle : l'en-tête reste lisible quand la colonne est étroite.
                     .child(
                         div()
                             .id("save-prompt")
-                            .h(px(24.0))
-                            .px_2()
+                            .size(px(24.0))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap_1p5()
+                            .justify_center()
                             .rounded(px(6.0))
                             .border_1()
                             .border_color(T.border)
-                            .text_size(px(12.0))
                             .text_color(T.text2)
                             .cursor_pointer()
                             .hover(|d| d.bg(T.hover).text_color(T.text))
+                            .tooltip(|window, cx| Tooltip::new("Enregistrer ce prompt dans la bibliothèque").build(window, cx))
                             .on_click(cx.listener(|this, _, _, cx| this.save_conversation_prompt(cx)))
-                            .child(icon(icons::QUOTE).size(px(12.0)))
-                            .child("Enregistrer le prompt"),
+                            .child(icon(icons::QUOTE).size(px(12.0))),
+                    )
+                    .child(
+                        div()
+                            .id("checkpoints")
+                            .h(px(24.0))
+                            .px_1p5()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(if self.checkpoints_open { T.accent } else { T.border })
+                            .text_size(px(11.0))
+                            .text_color(T.text2)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover).text_color(T.text))
+                            .tooltip(|window, cx| Tooltip::new("Points de retour : revenir à l'état des fichiers avant un message").build(window, cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_checkpoints(cx)))
+                            .child(icon(icons::HISTORY).size(px(12.0)))
+                            .when(!self.checkpoint_list.is_empty(), |d| d.child(self.checkpoint_list.len().to_string())),
                     )
                     .child(if exited {
                         div().text_size(px(12.0)).text_color(T.text3).child("terminée").into_any_element()
@@ -1853,7 +1926,8 @@ impl Workspace {
                     }),
             );
 
-        center.child(header).child(div().flex_1().min_h_0().pt(px(14.0)).px_4().child(terminal))
+        let checkpoints = self.render_checkpoints(cx);
+        center.child(header).children(checkpoints).child(div().flex_1().min_h_0().pt(px(14.0)).px_4().child(terminal))
     }
 
     fn render_welcome(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1997,6 +2071,11 @@ impl Workspace {
         if self.right == RightPanel::Journal {
             return Some(panel.child(self.render_journal(cx)));
         }
+        if let RightPanel::Tasks(group) = self.right {
+            if let Some(view) = self.render_task_panel(group, cx) {
+                return Some(panel.child(view));
+            }
+        }
         if self.right == RightPanel::Prompt {
             if let Some(view) = self.render_prompt_panel(cx) {
                 return Some(panel.child(view));
@@ -2104,7 +2183,7 @@ impl Workspace {
                         None => format!("{total} lignes"),
                     })
             })
-            .child(div().flex().p(px(2.0)).gap(px(2.0)).border_1().border_color(T.border).rounded(px(6.0)).child(mode_button("Fichier", PreviewMode::File, self.preview_mode)).child(mode_button("Diff", PreviewMode::Diff, self.preview_mode)))
+            .child(div().flex().p(px(2.0)).gap(px(2.0)).border_1().border_color(T.border).rounded(px(6.0)).child(mode_button("Fichier", PreviewMode::File, self.preview_mode)).child(mode_button("Diff", PreviewMode::Diff, self.preview_mode)).child(mode_button("Côte à côte", PreviewMode::Split, self.preview_mode)))
             .child(
                 div()
                     .id("revert")
@@ -2145,30 +2224,7 @@ impl Workspace {
             );
 
         let mode = self.preview_mode;
-        let lines = file.lines.iter().filter(|l| mode == PreviewMode::Diff || l.kind != LineKind::Removed).map(|line| {
-            let (bg, gutter, sign, sign_color) = match line.kind {
-                LineKind::Added => (Some(T.add_bg), Some(T.add_gutter), "+", T.add_fg),
-                LineKind::Removed => (Some(T.del_bg), Some(T.del_gutter), "−", T.del_fg),
-                LineKind::Same => (None, None, " ", T.text3),
-            };
-            div()
-                .flex()
-                .h(px(20.0))
-                .when_some(bg, |d, bg| d.bg(bg))
-                .child(
-                    div()
-                        .w(px(48.0))
-                        .flex_shrink_0()
-                        .pr_2()
-                        .flex()
-                        .justify_end()
-                        .text_color(T.text3)
-                        .when_some(gutter, |d, g| d.bg(g))
-                        .child(line.number.map(|n| n.to_string()).unwrap_or_default()),
-                )
-                .child(div().w(px(18.0)).flex_shrink_0().text_center().text_color(sign_color).child(sign))
-                .child(div().whitespace_nowrap().child(code_text(&line.text, &line.spans)))
-        });
+        let lines = self.render_diff_lines(&file, mode, cx);
 
         let files_list = div()
             .flex_shrink_0()

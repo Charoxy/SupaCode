@@ -47,6 +47,8 @@ pub struct Command {
 pub enum TerminalEvent {
     /// Le programme a écrit dans le terminal.
     Output,
+    /// L'utilisateur a validé une saisie (Entrée).
+    Submitted,
     Exited,
 }
 
@@ -182,6 +184,9 @@ impl TerminalView {
             // Toute frappe ramène la vue en bas de l'historique.
             self.term.lock().scroll_display(Scroll::Bottom);
             self.write(bytes);
+            if keystroke.key == "enter" && !mods.shift && !mods.control && !mods.alt {
+                cx.emit(TerminalEvent::Submitted);
+            }
             cx.stop_propagation();
         }
     }

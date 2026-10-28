@@ -140,7 +140,7 @@ pub fn merge_settings(a: Option<Value>, b: Option<Value>) -> Option<Value> {
 pub const SUPACODE_SERVER: &str = "supacode";
 
 fn frontmatter(text: &str) -> BTreeMap<String, String> {
-    let text = text.replace("\r\n", "\n");
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let Some(header) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")).map(|(h, _)| h.to_owned()) else { return BTreeMap::new() };
     let mut fields = BTreeMap::new();
     let mut current: Option<String> = None;

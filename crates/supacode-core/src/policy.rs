@@ -80,7 +80,7 @@ pub fn load(root: &Path) -> Result<Option<Policy>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("lecture de {}", path.display())),
     };
-    let policy = serde_json::from_str(&text).with_context(|| format!("{FILE} n'est pas valide"))?;
+    let policy = serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| format!("{FILE} n'est pas valide"))?;
     Ok(Some(policy))
 }
 

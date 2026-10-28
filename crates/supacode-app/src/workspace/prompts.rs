@@ -26,6 +26,7 @@ pub(super) struct PromptView {
 pub(super) enum Pending {
     Prompt { root: PathBuf, file: PromptFile },
     Workflow { root: PathBuf, file: WorkflowFile },
+    Task { root: PathBuf },
 }
 
 impl Workspace {
@@ -143,13 +144,40 @@ impl Workspace {
 
     /// Ouvre la fenêtre de saisie ; `pending` part à la validation.
     pub(super) fn ask_user(&mut self, title: String, subtitle: Option<String>, submit: &'static str, fields: Vec<(String, String, String)>, pending: Pending, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = cx.new(|cx| AskDialog::new(title, subtitle, submit, fields, window, cx));
+        self.ask_user_with(title, subtitle, submit, fields, None, pending, window, cx);
+    }
+
+    /// Comme `ask_user`, avec une liste de choix (valeur rendue sous la clé `choix`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn ask_user_with(
+        &mut self,
+        title: String,
+        subtitle: Option<String>,
+        submit: &'static str,
+        fields: Vec<(String, String, String)>,
+        choices: Option<(&str, Vec<(String, String)>)>,
+        pending: Pending,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = cx.new(|cx| {
+            let dialog = AskDialog::new(title, subtitle, submit, fields, window, cx);
+            match choices {
+                Some((label, choices)) => dialog.with_choices(label, choices),
+                None => dialog,
+            }
+        });
         cx.subscribe_in(&dialog, window, |this, _, event: &AskEvent, window, cx| {
             let Some((_, pending)) = this.ask.take() else { return };
             if let AskEvent::Submit(values) = event {
                 match pending {
                     Pending::Prompt { root, file } => this.run_prompt(root, file, values.clone(), window, cx),
                     Pending::Workflow { root, file } => this.start_workflow(root, file, "manuel".into(), values.clone(), true, cx),
+                    Pending::Task { root } => {
+                        let prompt = values.get("demande").cloned().unwrap_or_default();
+                        let choice = values.get("choix").cloned().unwrap_or_default();
+                        this.start_task(root, prompt, &choice, cx);
+                    }
                 }
             }
             this.refocus(window, cx);

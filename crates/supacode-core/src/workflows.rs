@@ -90,7 +90,8 @@ pub fn load_workflows(project: &Path) -> Result<Vec<WorkflowFile>> {
         .map(|path| {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let text = fs::read_to_string(&path).with_context(|| format!("{name} : lecture impossible"))?;
-            let workflow: Workflow = serde_json::from_str(&text).with_context(|| format!("{name} : JSON invalide"))?;
+            // Le Bloc-notes de Windows peut ajouter un BOM en tête de fichier.
+            let workflow: Workflow = serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| format!("{name} : JSON invalide"))?;
             if workflow.steps.is_empty() {
                 bail!("{name} : au moins une étape est requise");
             }

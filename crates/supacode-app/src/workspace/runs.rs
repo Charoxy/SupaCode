@@ -538,6 +538,8 @@ impl Workspace {
             _ => None,
         };
         let expanded = step.is_expanded();
+        // Commande en échec (pas arrêtée) : on propose de faire corriger l'agent.
+        let fixable = step.kind == StepKind::Run && step.status == Some(StepStatus::Failed) && step.exit_code.is_some() && run.status != Some(RunStatus::Cancelled);
         let (run_id, step_id) = (run.id, step.id.clone());
         let waiting = step.status.is_none() && !step.running();
 
@@ -609,7 +611,30 @@ impl Workspace {
                     .child(marker)
                     .when(!last, |d| d.child(div().flex_1().w(px(1.0)).min_h(px(12.0)).bg(T.border))),
             )
-            .child(div().flex_1().min_w_0().pb_3().flex().flex_col().gap_2().child(title).children(output))
+            .child(div().flex_1().min_w_0().pb_3().flex().flex_col().gap_2().child(title).children(output).when(fixable, |d| {
+                let (root, workflow, name, command) = (run.project.clone(), run.name.clone(), step.name.clone(), step.detail.clone().unwrap_or_default());
+                let output: Vec<String> = step.lines.iter().map(|(_, text)| text.clone()).collect();
+                d.child(
+                    div().flex().child(
+                        div()
+                            .id(("fix-with-agent", index))
+                            .h(px(26.0))
+                            .px_2p5()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(T.border_strong)
+                            .text_size(px(12.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover))
+                            .on_click(cx.listener(move |this, _, window, cx| this.fix_with_agent(root.clone(), workflow.clone(), name.clone(), command.clone(), output.clone(), window, cx)))
+                            .child(icon(icons::CLAUDE).size(px(11.0)).text_color(T.claude))
+                            .child("Corriger avec l'agent"),
+                    ),
+                )
+            }))
     }
 
     fn render_approval(&self, run: &WorkflowRun, step: &StepView, cx: &mut Context<Self>) -> impl IntoElement {
