@@ -49,6 +49,10 @@ pub struct Policy {
     pub protected_files: Vec<String>,
     #[serde(default)]
     pub budget: Budget,
+    /// Lignes modifiées (ajoutées + supprimées) au-delà desquelles le lot est trop gros
+    /// pour être relu : les étapes d'agent des workflows s'arrêtent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_diff_lines: Option<usize>,
     /// Outils du navigateur intégré pour les agents.
     #[serde(default = "yes")]
     pub browser: bool,
@@ -56,7 +60,15 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { agents: Vec::new(), models: Vec::new(), blocked_commands: Vec::new(), protected_files: Vec::new(), budget: Budget::default(), browser: true }
+        Self {
+            agents: Vec::new(),
+            models: Vec::new(),
+            blocked_commands: Vec::new(),
+            protected_files: Vec::new(),
+            budget: Budget::default(),
+            max_diff_lines: None,
+            browser: true,
+        }
     }
 }
 
@@ -87,6 +99,7 @@ pub fn template() -> String {
         ],
         protected_files: vec![".env".into(), ".env.*".into(), "*.pem".into(), "*.key".into(), "secrets/**".into()],
         budget: Budget { daily_usd: Some(20.0), monthly_usd: Some(300.0), per_run_usd: Some(5.0) },
+        max_diff_lines: Some(400),
         browser: true,
     };
     serde_json::to_string_pretty(&policy).unwrap_or_default() + "\n"
@@ -185,6 +198,35 @@ impl Policy {
         }
         Some(serde_json::json!({ "permissions": { "deny": deny } }).to_string())
     }
+}
+
+/// Lignes modifiées depuis le dernier commit (ajoutées + supprimées), fichiers nouveaux compris.
+pub fn changed_lines(root: &Path) -> Option<usize> {
+    use crate::process::{self, Spawn};
+    let run = |args: &[&str], on_line: &mut dyn FnMut(&str)| {
+        let spawn = Spawn::program("git", args.iter().map(|a| (*a).to_owned()).collect(), root);
+        process::run_lines(spawn, &Default::default(), |line| {
+            if !line.stderr {
+                on_line(&line.text);
+            }
+        })
+        .ok()
+        .flatten()
+        .filter(|code| *code == 0)
+    };
+    let mut total = 0;
+    run(&["diff", "--numstat", "HEAD"], &mut |line| {
+        let mut parts = line.split('\t');
+        total += parts.next().and_then(|a| a.parse::<usize>().ok()).unwrap_or(0);
+        total += parts.next().and_then(|r| r.parse::<usize>().ok()).unwrap_or(0);
+    })?;
+    let mut untracked = Vec::new();
+    run(&["ls-files", "--others", "--exclude-standard"], &mut |line| untracked.push(line.to_owned()));
+    for file in untracked {
+        // Un fichier énorme (données, binaire) compte pour ce qu'on peut raisonnablement relire.
+        total += std::fs::read_to_string(root.join(&file)).map(|t| t.lines().count().min(5_000)).unwrap_or(0);
+    }
+    Some(total)
 }
 
 /// `*` remplace n'importe quelle suite de caractères.

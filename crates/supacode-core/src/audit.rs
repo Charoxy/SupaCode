@@ -23,6 +23,7 @@ pub mod kind {
     pub const BLOCKED: &str = "blocage";
     pub const BROWSER: &str = "navigateur";
     pub const POLICY: &str = "règles";
+    pub const PROMPT: &str = "prompt";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -119,6 +119,14 @@ impl Editor {
         edit::step_at(&self.workflow, path)
     }
 
+    fn set_expect(&mut self, fail: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.selected else { return };
+        if let Some(step) = self.step_mut(path) {
+            step.expect = fail.then(|| "fail".to_owned());
+        }
+        self.touch(cx);
+    }
+
     fn step_mut(&mut self, path: StepPath) -> Option<&mut Step> {
         edit::step_at_mut(&mut self.workflow, path)
     }
@@ -624,6 +632,13 @@ impl Editor {
                         });
                         body = body.child(field("Agent", div().flex().gap_1p5().children(agents)).child(hint("Auto : l'orchestrateur choisit aussi l'agent.")));
                         body = body.child(self.render_routing(step, cx));
+                    }
+                    StepKind::Run => {
+                        let expect_fail = step.expect.as_deref() == Some("fail");
+                        let options = [(false, "Doit réussir"), (true, "Doit échouer")].map(|(fail, label)| {
+                            chip(format!("expect-{fail}"), label, expect_fail == fail).on_click(cx.listener(move |this, _, _, cx| this.set_expect(fail, cx)))
+                        });
+                        body = body.child(field("Résultat attendu", div().flex().gap_1p5().children(options)).child(hint("« Doit échouer » : un test qui reproduit un bug avant sa correction. S'il passe déjà, l'étape échoue.")));
                     }
                     StepKind::Parallel => {
                         body = body.child(hint("Les branches s'exécutent en même temps ; le groupe échoue si l'une d'elles échoue. Sélectionne le groupe puis un bloc de la bibliothèque pour ajouter une branche."));

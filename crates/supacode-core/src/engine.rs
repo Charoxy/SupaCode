@@ -9,7 +9,8 @@ use std::thread;
 
 use crate::agents::{self, AgentEvent};
 use crate::audit::{self, kind};
-use crate::policy::Policy;
+use crate::policy::{self, Policy};
+use crate::prompts;
 use crate::process::{self, Spawn};
 use crate::router::{self, AgentId, OrchestratorConfig};
 use crate::workflows::{Step, Workflow};
@@ -275,9 +276,43 @@ impl Run<'_> {
                 });
                 let code = result.as_ref().ok().copied().flatten();
                 self.journal(kind::COMMAND, command.clone(), serde_json::json!({ "étape": id, "code": code }), None);
-                result
+                if step.expect.as_deref() == Some("fail") {
+                    // Le test doit reproduire le bug : un échec est le résultat attendu.
+                    result.map(|code| match code {
+                        Some(0) => {
+                            self.output(&id, AgentEvent::Error("Cette commande devait échouer : le test passe déjà, il ne reproduit pas le bug.".into()));
+                            Some(1)
+                        }
+                        Some(_) => {
+                            self.output(&id, AgentEvent::Log("✓ échec attendu : le test reproduit le bug.".into()));
+                            Some(0)
+                        }
+                        None => None,
+                    })
+                } else {
+                    result
+                }
             } else {
-                let prompt = self.render(step.prompt.as_deref().unwrap_or_default());
+                let raw = step.prompt.as_deref().unwrap_or_default();
+                let mut from_library = None;
+                let raw = match raw.trim().strip_prefix("@prompts/") {
+                    Some(name) => match prompts::load(&self.options.cwd, name) {
+                        Ok(file) => {
+                            from_library = Some((file.id.clone(), prompts::version(&self.options.cwd, &file.id)));
+                            if let Some((name, version)) = &from_library {
+                                self.output(&id, AgentEvent::Log(format!("prompt « {name} », version {version}")));
+                            }
+                            file.body
+                        }
+                        Err(e) => {
+                            let (status, message, code) = self.refuse(&id, format!("{e:#}"));
+                            self.finish(&id, status, message, code);
+                            return;
+                        }
+                    },
+                    None => raw.to_owned(),
+                };
+                let prompt = self.render(&raw);
                 let forced = match step.agent.as_deref() {
                     Some("claude") => Some(AgentId::Claude),
                     Some("codex") => Some(AgentId::Codex),
@@ -336,7 +371,14 @@ impl Run<'_> {
                 self.journal(
                     kind::AGENT,
                     format!("{} ({model_label}) : {}", agent.label(), prompt.chars().take(160).collect::<String>()),
-                    serde_json::json!({ "étape": id, "agent": agent.as_str(), "modèle": model, "outils": tools }),
+                    serde_json::json!({
+                        "étape": id,
+                        "agent": agent.as_str(),
+                        "modèle": model,
+                        "outils": tools,
+                        "prompt": from_library.as_ref().map(|(name, _)| name),
+                        "version": from_library.as_ref().map(|(_, version)| version),
+                    }),
                     cost,
                 );
                 match violation {
@@ -345,7 +387,18 @@ impl Run<'_> {
                         self.finish(&id, status, message, code);
                         return;
                     }
-                    None => result,
+                    None => {
+                        let limit = policy.and_then(|p| p.max_diff_lines);
+                        match limit.and_then(|limit| policy::changed_lines(&self.options.cwd).filter(|n| *n > limit).map(|n| (n, limit))) {
+                            Some((lines, limit)) if result.as_ref().is_ok_and(|c| *c == Some(0)) => {
+                                let message = format!("Lot trop gros pour être relu : {lines} lignes modifiées (limite des règles d'équipe : {limit}). Découpe le travail avant de continuer.");
+                                let (status, message, code) = self.refuse(&id, message);
+                                self.finish(&id, status, message, code);
+                                return;
+                            }
+                            _ => result,
+                        }
+                    }
                 }
             };
             match result {
@@ -511,6 +564,29 @@ mod tests {
             _ => None,
         });
         assert_eq!(message.as_deref().map(str::trim), Some("bonjour monde {{inconnu}}"));
+    }
+
+    #[test]
+    fn commande_qui_doit_echouer() {
+        let wf = workflow(
+            r#"{"name":"t","steps":[
+                {"id":"rouge","run":"exit 3","expect":"fail"},
+                {"id":"deja_vert","run":"echo ok","expect":"fail"},
+                {"id":"apres","run":"echo apres"}
+            ]}"#,
+        );
+        let host = Recorder { events: Mutex::default(), answer: true };
+        assert_eq!(run(&wf, &options(), &host), RunStatus::Failed);
+        assert_eq!(statuses(&host), [("rouge".into(), StepStatus::Success), ("deja_vert".into(), StepStatus::Failed), ("apres".into(), StepStatus::Skipped)]);
+    }
+
+    #[test]
+    fn prompt_introuvable() {
+        let wf = workflow(r#"{"name":"t","steps":[{"id":"a","prompt":"@prompts/inexistant"}]}"#);
+        let host = Recorder { events: Mutex::default(), answer: true };
+        assert_eq!(run(&wf, &options(), &host), RunStatus::Failed);
+        let events = host.events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(e, Event::Output { event: AgentEvent::Error(m), .. } if m.contains("introuvable"))));
     }
 
     #[test]

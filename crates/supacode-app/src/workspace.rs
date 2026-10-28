@@ -23,12 +23,15 @@ use crate::preview::{self, ChangedFile, LineKind};
 use crate::terminal::{Command, TerminalEvent, TerminalView};
 use crate::theme::{self, DARK as T};
 
+mod prompts;
 mod runs;
 mod team;
 
 use runs::WorkflowRun;
 use supacode_core::audit::{self, kind};
 use supacode_core::costs::Scanner;
+use prompts::{Pending, PromptView};
+use supacode_core::prompts::PromptFile;
 use team::{JournalFilter, TeamData};
 
 /// Conversations affichées par projet avant « Voir plus ».
@@ -58,6 +61,7 @@ struct Tab {
 enum SidebarTab {
     Projects,
     Workflows,
+    Prompts,
     Team,
 }
 
@@ -98,6 +102,8 @@ enum RightPanel {
     Browser,
     /// Journal d'audit du projet.
     Journal,
+    /// Prompt de la bibliothèque (`prompt_view`).
+    Prompt,
     /// Fichier ouvert depuis la palette.
     File,
 }
@@ -160,6 +166,11 @@ pub struct Workspace {
     journal_filter: JournalFilter,
     /// Message bref dans la barre d'état.
     toast: Option<(SharedString, Instant)>,
+    /// Bibliothèque de prompts du projet des workflows.
+    prompts: Result<Vec<PromptFile>, String>,
+    prompt_view: Option<PromptView>,
+    /// Saisie demandée avant un lancement.
+    ask: Option<(Entity<crate::ask::AskDialog>, Pending)>,
     /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
     mcp_config: Option<PathBuf>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
@@ -208,6 +219,9 @@ impl Workspace {
             scanner: Default::default(),
             journal_filter: JournalFilter::All,
             toast: None,
+            prompts: Ok(Vec::new()),
+            prompt_view: None,
+            ask: None,
             mcp_config: None,
             editor: None,
             opened: None,
@@ -394,6 +408,7 @@ impl Workspace {
             return;
         };
         self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
+        self.load_prompts();
         self.watch_saves(project.path, cx);
         self.refresh_team(cx);
         cx.notify();
@@ -803,7 +818,7 @@ impl Workspace {
                     self.open_editor(path, name, Some(file.id), file.workflow, window, cx);
                 }
                 palette::Command::RunWorkflow(path, file) => {
-                    self.run_workflow(path, file, cx);
+                    self.launch_workflow(path, file, window, cx);
                     self.refocus(window, cx);
                 }
             },
@@ -855,7 +870,7 @@ impl Workspace {
                         this.editor = None;
                         let file = load_workflows(&project).ok().and_then(|files| files.into_iter().find(|f| &f.id == id));
                         if let Some(file) = file {
-                            this.run_workflow(project.clone(), file, cx);
+                            this.launch_workflow(project.clone(), file, window, cx);
                         }
                     }
                 }
@@ -1045,10 +1060,13 @@ impl Render for Workspace {
         });
         let titlebar = self.render_titlebar(window, cx);
         let activity = self.render_activity_bar(cx);
-        let browser_shown = self.right == RightPanel::Browser && self.palette.is_none() && self.creator.is_none() && self.editor.is_none();
+        let browser_shown = self.right == RightPanel::Browser && self.palette.is_none() && self.creator.is_none() && self.editor.is_none() && self.ask.is_none();
         if let Some(browser) = &self.browser {
             browser.update(cx, |b, _| b.set_shown(browser_shown));
         }
+        let ask = self.ask.as_ref().map(|(dialog, _)| {
+            div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(120.0)).child(dialog.clone())
+        });
         let sidebar = self.sidebar_open.then(|| self.render_sidebar(window, cx).into_any_element());
         let (center, right) = if self.editor.is_none() {
             (Some(self.render_center(window, cx).into_any_element()), self.render_right(cx).map(|r| r.into_any_element()))
@@ -1107,6 +1125,7 @@ impl Render for Workspace {
             .child(self.render_status(cx))
             .children(overlay)
             .children(creator)
+            .children(ask)
     }
 }
 
@@ -1256,12 +1275,14 @@ impl Workspace {
         let body = match self.sidebar_tab {
             SidebarTab::Projects => projects_tab.into_any_element(),
             SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
+            SidebarTab::Prompts => self.render_prompts(cx).into_any_element(),
             SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
         let actions = self.render_sidebar_actions(cx);
         let (title, count) = match self.sidebar_tab {
             SidebarTab::Projects => ("Projets", self.projects.len()),
             SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
+            SidebarTab::Prompts => ("Prompts", self.prompts.as_ref().map(|p| p.len()).unwrap_or(0)),
             SidebarTab::Team => ("Équipe", 0),
         };
 
@@ -1355,6 +1376,7 @@ impl Workspace {
                 .child(primary("new-conversation", "Nouvelle conversation").on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx))))
                 .child(add_project("Projet", false)),
             SidebarTab::Workflows => row.child(primary("new-workflow", "Nouveau workflow").on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))),
+            SidebarTab::Prompts => row.child(primary("new-prompt", "Nouveau prompt").on_click(cx.listener(|this, _, _, cx| this.new_prompt(cx)))),
             SidebarTab::Team => match &self.team.policy {
                 None => row.child(primary("policy-create", "Créer les règles d'équipe").on_click(cx.listener(|this, _, _, cx| this.create_policy(cx)))),
                 Some(Err(_)) => row.child(primary("policy-fix", "Corriger les règles").on_click(cx.listener(|this, _, _, cx| this.edit_policy(cx)))),
@@ -1382,6 +1404,7 @@ impl Workspace {
             .border_color(T.border)
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
+            .child(self.activity_button("activity-prompts", icons::QUOTE, SidebarTab::Prompts, false, cx))
             .child(self.activity_button("activity-team", icons::SHIELD, SidebarTab::Team, self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED), cx))
             .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
             .child({
@@ -1544,9 +1567,9 @@ impl Workspace {
                         (None, Some(path)) => {
                             let (path, file) = (path.clone(), file.clone());
                             button
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.run_workflow(path.clone(), file.clone(), cx);
+                                    this.launch_workflow(path.clone(), file.clone(), window, cx);
                                 }))
                                 .child(icon(icons::PLAY).size(px(10.0)))
                         }
@@ -1617,6 +1640,7 @@ impl Workspace {
                 }
             }
         }
+        let templates = self.workflows_project().map(|_| self.render_templates(cx));
         let picker = (self.picking_project && self.projects.len() > 1).then(|| {
             let current = current.as_ref().map(project_key);
             div().mx_2().mb_1().p_1().rounded(px(6.0)).border_1().border_color(T.border).bg(T.app).flex().flex_col().gap(px(2.0)).children(
@@ -1678,6 +1702,7 @@ impl Workspace {
             })
             .children(picker)
             .child(body)
+            .children(templates)
     }
 
     fn render_center(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1766,6 +1791,25 @@ impl Workspace {
                             .child("Claude"),
                     )
                     .child(div().max_w(px(260.0)).truncate().text_size(px(12.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(cwd))
+                    .child(
+                        div()
+                            .id("save-prompt")
+                            .h(px(24.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(T.border)
+                            .text_size(px(12.0))
+                            .text_color(T.text2)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover).text_color(T.text))
+                            .on_click(cx.listener(|this, _, _, cx| this.save_conversation_prompt(cx)))
+                            .child(icon(icons::QUOTE).size(px(12.0)))
+                            .child("Enregistrer le prompt"),
+                    )
                     .child(if exited {
                         div().text_size(px(12.0)).text_color(T.text3).child("terminée").into_any_element()
                     } else {
@@ -1934,6 +1978,11 @@ impl Workspace {
         if self.right == RightPanel::Journal {
             return Some(panel.child(self.render_journal(cx)));
         }
+        if self.right == RightPanel::Prompt {
+            if let Some(view) = self.render_prompt_panel(cx) {
+                return Some(panel.child(view));
+            }
+        }
         if self.right == RightPanel::Browser {
             if let Some(browser) = self.browser.clone() {
                 return Some(panel.child(self.render_right_tabs(None, cx)).child(div().flex_1().min_h_0().child(browser)));
@@ -2021,6 +2070,21 @@ impl Workspace {
             .border_b_1()
             .border_color(T.border)
             .child(div().flex_1().min_w_0().truncate().text_size(px(12.0)).text_color(T.text2).font_family(theme::MONO_FONT).child(file.relative.replace('/', " › ")))
+            .child({
+                // Taille du lot : au-delà de la limite des règles, il devient difficile à relire.
+                let total: usize = changed.iter().map(|f| f.added + f.removed).sum();
+                let limit = self.team.policy.as_ref().and_then(|p| p.as_ref().ok()).and_then(|p| p.max_diff_lines);
+                let over = limit.is_some_and(|l| total > l);
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .text_color(if over { T.err } else { T.text3 })
+                    .child(match limit {
+                        Some(l) if over => format!("{total} lignes, lot trop gros (limite {l})"),
+                        Some(l) => format!("{total} / {l} lignes"),
+                        None => format!("{total} lignes"),
+                    })
+            })
             .child(div().flex().p(px(2.0)).gap(px(2.0)).border_1().border_color(T.border).rounded(px(6.0)).child(mode_button("Fichier", PreviewMode::File, self.preview_mode)).child(mode_button("Diff", PreviewMode::Diff, self.preview_mode)))
             .child(
                 div()

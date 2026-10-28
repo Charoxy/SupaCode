@@ -95,6 +95,12 @@ pub fn validate(workflow: &Workflow) -> Result<()> {
         if empty(&step.approve) {
             bail!("la validation « {} » n'a pas de question", step.id);
         }
+        match step.expect.as_deref() {
+            None | Some("success") => {}
+            Some("fail") if step.run.is_some() => {}
+            Some("fail") => bail!("« expect » ne s'applique qu'aux commandes (étape « {} »)", step.id),
+            Some(other) => bail!("« expect » doit valoir « fail » ou « success » (étape « {} » : « {other} »)", step.id),
+        }
         if step.kind() == StepKind::Parallel && step.parallel.as_ref().is_some_and(Vec::is_empty) {
             bail!("le groupe parallèle « {} » est vide", step.id);
         }

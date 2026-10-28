@@ -35,6 +35,9 @@ pub struct Step {
     pub condition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// Pour `run` : « fail » si la commande doit échouer (test qui reproduit un bug).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +57,9 @@ pub struct Workflow {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<Vec<Trigger>>,
+    /// Question posée au lancement manuel ; la réponse devient `{{saisie}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
     pub steps: Vec<Step>,
 }
 

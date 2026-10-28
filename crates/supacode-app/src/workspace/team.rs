@@ -248,6 +248,7 @@ impl Workspace {
                     .child(line("Commandes bloquées", if p.blocked_commands.is_empty() { "aucune".into() } else { p.blocked_commands.join("  ·  ") }))
                     .child(line("Fichiers protégés", list(&p.protected_files, "aucun")))
                     .child(line("Budgets", if budget.is_empty() { "aucun".into() } else { budget.join(", ") }))
+                    .child(line("Taille d'un lot", p.max_diff_lines.map(|n| format!("{n} lignes modifiées au plus")).unwrap_or_else(|| "sans limite".into())))
                     .child(line("Navigateur", if p.browser { "permis aux agents".into() } else { "interdit aux agents".into() }))
                     .child(
                         div()

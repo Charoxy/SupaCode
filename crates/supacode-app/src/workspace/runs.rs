@@ -460,10 +460,10 @@ impl Workspace {
                             .text_size(px(12.0))
                             .cursor_pointer()
                             .hover(|d| d.bg(T.hover))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 let file = load_workflows(&project).ok().and_then(|files| files.into_iter().find(|f| f.id == workflow_id));
                                 if let Some(file) = file {
-                                    this.run_workflow(project.clone(), file, cx);
+                                    this.launch_workflow(project.clone(), file, window, cx);
                                 }
                             }))
                             .child(icon(icons::PLAY).size(px(10.0)))

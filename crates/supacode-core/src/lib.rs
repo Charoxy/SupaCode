@@ -9,6 +9,8 @@ pub mod engine;
 pub mod generate;
 pub mod policy;
 pub mod process;
+pub mod prompts;
 pub mod router;
+pub mod templates;
 pub mod time;
 pub mod workflows;
