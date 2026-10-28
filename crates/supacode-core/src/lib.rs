@@ -8,6 +8,7 @@ pub mod edit;
 pub mod engine;
 pub mod extensions;
 pub mod generate;
+pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod prompts;

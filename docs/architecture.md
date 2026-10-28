@@ -93,6 +93,7 @@ L'IDE est une application native en Rust, construite sur GPUI (le moteur d'inter
 | `supacode-core::prompts` | Bibliothèque de prompts (`.supacode/prompts/*.md`) : en-tête, variables, historique et versions via git, dernière demande d'un transcript. |
 | `supacode-core::templates` | Workflows prêts à l'emploi (« Correctif : tests d'abord ») et détection de la commande de test du projet. |
 | `supacode-core::extensions` | Skills et serveurs MCP : inventaire, désactivations traduites en `--settings`, recherche SkillsMP et catalogue d'Anthropic, installation d'un dossier GitHub (via `curl`). |
+| `supacode-core::plugins` | Plugins de Claude Code par la CLI (`claude plugin list --available --json`, `install`, `enable`, `disable`, `uninstall`), avec confirmation des commandes déclarées par une marketplace. |
 | `supacode-core::engine` | Moteur de workflows : conditions, parallélisme, validations, `{{variables}}`, `SUPACODE_*`, arrêt. |
 | `supacode-core::process` | Lancement des commandes, lecture ligne à ligne, arrêt de l'arbre de processus. |
 | `supacode-app::terminal` | Terminal intégré (`alacritty_terminal`, ConPTY sous Windows) où tourne la CLI `claude`. |
