@@ -35,10 +35,12 @@ pub fn run(agent: AgentId, model: Option<&str>, prompt: &str, cwd: &Path, extra:
         // `--sandbox workspace-write` : équivalent de l'ancien `--full-auto` (retiré des versions récentes).
         AgentId::Codex => ["exec", "--json", "--sandbox", "workspace-write"].map(Into::into).into(),
     };
+    // Les options supplémentaires d'abord : `--mcp-config` et `--allowedTools` prennent
+    // plusieurs valeurs et s'arrêtent à l'option suivante.
+    args.extend(extra.iter().cloned());
     if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
     }
-    args.extend(extra.iter().cloned());
     if agent == AgentId::Codex {
         // « - » : la demande est lue sur l'entrée standard.
         args.push("-".into());

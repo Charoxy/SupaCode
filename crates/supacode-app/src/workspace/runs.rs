@@ -280,6 +280,8 @@ impl Workspace {
         };
         let claude_id = self.projects.iter().find(|p| same_path(&p.path, &project)).map(|p| p.id.clone()).unwrap_or_default();
         let claude_settings = self.extension_settings(&project);
+        let browser_allowed = policy.as_ref().is_none_or(|p| p.browser) && self.browser_tools_enabled();
+        let mcp_config = self.mcp_config.clone().filter(|_| browser_allowed);
         let scanner = self.scanner.clone();
         let root = project.clone();
         std::thread::spawn(move || {
@@ -290,7 +292,7 @@ impl Workspace {
             } else {
                 engine::Spent::default()
             };
-            let options = RunOptions { cwd: root, context, cancel, policy, spent, journal: true, claude_settings };
+            let options = RunOptions { cwd: root, context, cancel, policy, spent, journal: true, claude_settings, mcp_config };
             engine::run(&workflow, &options, &ChannelHost(tx));
         });
 

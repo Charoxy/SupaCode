@@ -103,6 +103,8 @@ pub struct RunOptions {
     pub journal: bool,
     /// Réglages ajoutés à `claude --settings` (skills et serveurs MCP désactivés).
     pub claude_settings: Option<serde_json::Value>,
+    /// Serveur MCP de SupaCode (navigateur intégré) donné aux étapes Claude.
+    pub mcp_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -335,10 +337,17 @@ impl Run<'_> {
                 self.host.emit(Event::Routed { id: id.clone(), agent, model: model.clone(), reason: decision.reason });
                 // Claude applique lui-même les interdictions ; pour Codex, on vérifie après coup.
                 let from_policy = policy.and_then(Policy::claude_settings).and_then(|s| serde_json::from_str(&s).ok());
-                let extra: Vec<String> = match (agent, crate::extensions::merge_settings(from_policy, self.options.claude_settings.clone())) {
-                    (AgentId::Claude, Some(settings)) => vec!["--settings".into(), settings.to_string()],
-                    _ => Vec::new(),
-                };
+                let mut extra: Vec<String> = Vec::new();
+                if agent == AgentId::Claude {
+                    // Outils du navigateur intégré. Ces options prennent plusieurs valeurs :
+                    // chacune doit être suivie d'une autre option.
+                    if let Some(config) = &self.options.mcp_config {
+                        extra.extend(["--mcp-config".into(), config.display().to_string(), "--allowedTools".into(), "mcp__supacode".into()]);
+                    }
+                    if let Some(settings) = crate::extensions::merge_settings(from_policy, self.options.claude_settings.clone()) {
+                        extra.extend(["--settings".into(), settings.to_string()]);
+                    }
+                }
                 let (mut tools, mut cost, mut violation) = (Vec::new(), None, None::<String>);
                 let result = agents::run(agent, model.as_deref(), &prompt, &self.options.cwd, &extra, &self.options.cancel, |event| {
                     match &event {

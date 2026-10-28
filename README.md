@@ -81,7 +81,7 @@ L'IDE lit les conversations de Claude Code dans `~/.claude/projects` ; un clic s
   - **Règles d'équipe** : `.supacode/policy.json`, versionné avec le code, donc les mêmes pour tout le monde. Agents et modèles permis, commandes bloquées (`git push --force*`, `rm -rf *`…), fichiers protégés (`.env`, `secrets/**`…), budgets par jour, par mois et par workflow, navigateur permis ou non. Les commandes des workflows sont vérifiées avant de tourner ; Claude reçoit les interdictions par `--settings` et les applique avant chaque outil ; Codex est vérifié après coup.
   - **Coûts estimés** : au prix public de l'API Claude, à partir des transcripts de Claude Code et du coût annoncé par les étapes d'agent ; total du jour dans la barre d'état. Un budget dépassé bloque les étapes d'agent des workflows.
   - **Journal d'audit** : conversations, commandes, agents (modèle, outils, coût), validations, blocages, navigateur, avec l'utilisateur git ; `.supacode/journal/` (ignoré par git), exportable en CSV.
-- **Les agents pilotent le navigateur** : chaque `claude` lancé par l'IDE reçoit le serveur MCP local de SupaCode (`browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`…) pour tester une fonctionnalité sous tes yeux.
+- **Les agents pilotent le navigateur** : chaque `claude` lancé par l'IDE (conversations et étapes d'agent des workflows) reçoit le serveur MCP local de SupaCode (`browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`…) pour tester une fonctionnalité sous tes yeux.
 
 ## Configuration
 
