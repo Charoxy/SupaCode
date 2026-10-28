@@ -162,3 +162,28 @@ describe("render", () => {
     expect(render("{{a}} et {{ b }}", { a: "1" })).toBe("1 et {{ b }}");
   });
 });
+
+describe("tests d'abord et bibliothèque de prompts", () => {
+  it("une commande « expect: fail » réussit en échouant, et arrête tout si elle passe", async () => {
+    const red = await execute({ name: "t", steps: [{ id: "rouge", run: node("process.exit(3)"), expect: "fail" }, { id: "suite", run: node("") }] });
+    expect(red.status("rouge")).toBe("success");
+    expect(red.status("suite")).toBe("success");
+    const green = await execute({ name: "t", steps: [{ id: "deja_vert", run: node(""), expect: "fail" }, { id: "suite", run: node("") }] });
+    expect(green.status("deja_vert")).toBe("failed");
+    expect(green.status("suite")).toBe("skipped");
+    expect(() => parseWorkflow({ name: "t", steps: [{ id: "a", prompt: "x", expect: "fail" }] })).toThrow(/run/);
+    expect(() => parseWorkflow({ name: "t", ask: "", steps: [{ id: "a", run: "x" }] })).toThrow(/ask/);
+  });
+
+  it("utilise un prompt de la bibliothèque avec ses variables", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "supacode-prompts-"));
+    await mkdir(join(dir, ".supacode", "prompts"), { recursive: true });
+    await writeFile(join(dir, ".supacode", "prompts", "corrige.md"), "---\ntitre: Corrige\n---\nCorrige {{saisie}}.\n");
+    const prompts: string[] = [];
+    const run = await execute({ name: "t", steps: [{ id: "a", prompt: "@prompts/corrige", agent: "claude" }] }, { cwd: dir, context: { saisie: "le bug 42" } }, prompts);
+    expect(run.result).toBe("success");
+    expect(prompts).toEqual(["Corrige le bug 42."]);
+    const missing = await execute({ name: "t", steps: [{ id: "a", prompt: "@prompts/absent" }] }, { cwd: dir });
+    expect(missing.status("a")).toBe("failed");
+  });
+});

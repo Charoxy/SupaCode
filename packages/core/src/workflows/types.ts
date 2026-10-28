@@ -24,9 +24,14 @@ interface StepBase {
 /** Commande shell (linters, tests, build…). */
 export interface RunStep extends StepBase {
   run: string;
+  /** "fail" : la commande doit échouer (un test qui reproduit un bug avant sa correction). */
+  expect?: "fail" | "success";
 }
 
-/** Tâche confiée à un agent ; "auto" (défaut) laisse l'orchestrateur choisir. */
+/**
+ * Tâche confiée à un agent ; "auto" (défaut) laisse l'orchestrateur choisir.
+ * `"prompt": "@prompts/<id>"` utilise un prompt de la bibliothèque du projet.
+ */
 export interface AgentStep extends StepBase {
   prompt: string;
   agent?: AgentId | "auto";
@@ -52,6 +57,8 @@ export interface Workflow {
   description?: string;
   /** Déclencheurs ; ["manual"] par défaut. */
   on?: WorkflowTrigger[];
+  /** Question posée au lancement manuel ; la réponse devient `{{saisie}}`. */
+  ask?: string;
   steps: WorkflowStep[];
 }
 

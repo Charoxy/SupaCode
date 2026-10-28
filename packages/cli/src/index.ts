@@ -18,6 +18,7 @@ Options :
   --model <modèle>       Force le modèle (run)
   --json                 Affiche les événements bruts (une ligne JSON par événement)
   -y, --yes              Valide automatiquement les étapes « approve » (workflows)
+  --saisie <texte>       Réponse à la question d'un workflow (« ask »), ex. la description d'un bug
   -h, --help             Affiche cette aide`;
 
 const AGENTS: readonly AgentId[] = ["claude", "codex"];
@@ -35,6 +36,7 @@ async function main(): Promise<number> {
       model: { type: "string" },
       json: { type: "boolean", default: false },
       yes: { type: "boolean", short: "y", default: false },
+      saisie: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -66,7 +68,7 @@ async function main(): Promise<number> {
     }
     case "workflow": {
       const [action, arg] = rest;
-      const options = { cwd, json: values.json, yes: values.yes, signal };
+      const options = { cwd, json: values.json, yes: values.yes, signal, saisie: values.saisie };
       if (action === "list") return listWorkflows(cwd);
       if (action === "run" && arg) return runWorkflowById(orchestrator, arg, options);
       if (action === "trigger" && (arg === "commit" || arg === "push")) return triggerWorkflows(orchestrator, arg, options);

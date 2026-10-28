@@ -17,6 +17,7 @@ export function parseWorkflow(value: unknown, source = "workflow"): Workflow {
   const wf = value as Record<string, unknown>;
   if (typeof wf.name !== "string" || !wf.name.trim()) fail("name", "nom manquant");
   if (wf.description !== undefined && typeof wf.description !== "string") fail("description", "doit être une chaîne");
+  if (wf.ask !== undefined && (typeof wf.ask !== "string" || !wf.ask.trim())) fail("ask", "question non vide attendue");
 
   if (wf.on !== undefined) {
     if (!Array.isArray(wf.on)) fail("on", "doit être une liste de déclencheurs");
@@ -51,6 +52,10 @@ export function parseWorkflow(value: unknown, source = "workflow"): Workflow {
         fail(`${where}.agent`, "attendu : auto, claude ou codex");
       }
       if (step.model !== undefined && typeof step.model !== "string") fail(`${where}.model`, "doit être une chaîne");
+      if (step.expect !== undefined) {
+        if (step.expect !== "fail" && step.expect !== "success") fail(`${where}.expect`, "attendu : fail ou success");
+        if (kind !== "run") fail(`${where}.expect`, "ne s'applique qu'aux commandes (run)");
+      }
       if (step.name !== undefined && typeof step.name !== "string") fail(`${where}.name`, "doit être une chaîne");
       if (step.if !== undefined && (typeof step.if !== "string" || !CONDITION.test(step.if))) {
         fail(`${where}.if`, `condition invalide ${JSON.stringify(step.if)} (always ou steps.<id>.success|failed|skipped)`);

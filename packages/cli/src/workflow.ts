@@ -7,6 +7,8 @@ export interface WorkflowCliOptions {
   json: boolean;
   yes: boolean;
   signal: AbortSignal;
+  /** Réponse à la question `ask` du workflow (`--saisie`). */
+  saisie?: string;
 }
 
 const STATUS_ICONS = { success: "✔", failed: "✖", skipped: "↷", cancelled: "■" } as const;
@@ -30,7 +32,26 @@ export async function runWorkflowById(orchestrator: Orchestrator, id: string, op
     console.error(`✖ Workflow « ${id} » introuvable (voir supacode workflow list).`);
     return 1;
   }
-  return execute(orchestrator, file.workflow, options);
+  // Le workflow pose une question : --saisie, sinon on la pose dans le terminal.
+  let context: Record<string, string> = {};
+  if (file.workflow.ask) {
+    const answer = options.saisie ?? (process.stdin.isTTY ? await question(file.workflow.ask) : undefined);
+    if (!answer?.trim()) {
+      console.error(`✖ Ce workflow demande : « ${file.workflow.ask} ». Réponds avec --saisie "…".`);
+      return 1;
+    }
+    context = { saisie: answer.trim() };
+  }
+  return execute(orchestrator, file.workflow, options, context);
+}
+
+async function question(text: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(`? ${text} `);
+  } finally {
+    rl.close();
+  }
 }
 
 /** Appelé par les hooks git : lance chaque workflow du déclencheur, s'arrête au premier échec. */
@@ -42,9 +63,9 @@ export async function triggerWorkflows(orchestrator: Orchestrator, trigger: "com
   return 0;
 }
 
-async function execute(orchestrator: Orchestrator, workflow: Workflow, options: WorkflowCliOptions): Promise<number> {
+async function execute(orchestrator: Orchestrator, workflow: Workflow, options: WorkflowCliOptions, context: Record<string, string> = {}): Promise<number> {
   let code = 1;
-  const runOptions = { cwd: options.cwd, signal: options.signal, approve: (_: string, message: string) => approve(message, options.yes) };
+  const runOptions = { cwd: options.cwd, signal: options.signal, context, approve: (_: string, message: string) => approve(message, options.yes) };
   for await (const event of runWorkflow(workflow, orchestrator, runOptions)) {
     if (event.type === "workflow.done") code = event.status === "success" ? 0 : 1;
     if (options.json) console.log(JSON.stringify(event));

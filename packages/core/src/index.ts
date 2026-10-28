@@ -9,5 +9,6 @@ export { CodexAgent, parseCodexLine } from "./agents/codex.js";
 export * from "./workflows/types.js";
 export * from "./workflows/loader.js";
 export * from "./workflows/engine.js";
+export * from "./workflows/prompts.js";
 export * from "./claude/sessions.js";
 export * from "./claude/env.js";

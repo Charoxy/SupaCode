@@ -1,3 +1,4 @@
+import { loadPrompt } from "./prompts.js";
 import { randomUUID } from "node:crypto";
 import { spawnLines } from "../agents/process.js";
 import type { Orchestrator } from "../orchestrator.js";
@@ -97,6 +98,12 @@ async function* runStep(step: WorkflowStep, state: RunState): AsyncGenerator<Wor
         }
       }
       status = exitCode === 0 ? "success" : "failed";
+      // Le test doit reproduire le bug : son échec est le résultat attendu.
+      if ("run" in step && step.expect === "fail" && exitCode !== undefined) {
+        status = exitCode === 0 ? "failed" : "success";
+        const message = exitCode === 0 ? "Cette commande devait échouer : le test passe déjà, il ne reproduit pas le bug." : "✓ échec attendu : le test reproduit le bug.";
+        yield { type: "step.event", stepId: step.id, event: exitCode === 0 ? { type: "error", message } : { type: "log", message } };
+      }
     }
   } catch (err) {
     yield { type: "step.event", stepId: step.id, event: { type: "error", message: (err as Error).message } };
@@ -125,7 +132,10 @@ async function* runCommand(command: string, state: RunState): AsyncGenerator<Ste
 
 /** Tâche d'agent ; les `{{variables}}` du prompt sont remplacées avant l'envoi. */
 async function* runAgent(step: AgentStep, state: RunState): AsyncGenerator<StepOutput> {
-  const prompt = render(step.prompt, await variables(step.prompt, state));
+  const library = /^\s*@prompts\/([\w-]+)\s*$/.exec(step.prompt);
+  const template = library ? (await loadPrompt(state.options.cwd, library[1] as string)).body : step.prompt;
+  if (library) yield { type: "log", message: `prompt « ${library[1]} » de la bibliothèque` };
+  const prompt = render(template, await variables(template, state));
   const override: RouteOverride = {};
   if (step.agent && step.agent !== "auto") override.agent = step.agent;
   if (step.model) override.model = step.model;
