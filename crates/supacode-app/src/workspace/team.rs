@@ -159,7 +159,7 @@ impl Workspace {
         policy::load(root).map_err(|e| format!("{e:#}"))
     }
 
-    fn create_policy(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn create_policy(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.team_project() else { return };
         let path = project.path.join(policy::FILE);
         if !path.exists() {
@@ -174,7 +174,7 @@ impl Workspace {
         self.refresh_team(cx);
     }
 
-    fn edit_policy(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn edit_policy(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.team_project() else { return };
         let path = project.path.join(policy::FILE);
         // Ouvert avec l'éditeur associé aux fichiers JSON.
@@ -229,14 +229,12 @@ impl Workspace {
                         "Aucune règle pour {}. Elles vivent dans {}, versionné avec le code : toute l'équipe a les mêmes.",
                         project.name,
                         policy::FILE
-                    )))
-                    .child(div().flex().child(button("policy-create", "Créer les règles", true).on_click(cx.listener(|this, _, _, cx| this.create_policy(cx)))));
+                    )));
             }
             Some(Err(error)) => {
                 rules = rules
                     .child(div().text_size(px(12.0)).text_color(T.err).child(format!("✖ {error}")))
-                    .child(div().text_size(px(12.0)).text_color(T.text3).child("Les agents sont bloqués tant que le fichier n'est pas corrigé."))
-                    .child(div().flex().child(button("policy-fix", "Corriger", true).on_click(cx.listener(|this, _, _, cx| this.edit_policy(cx)))));
+                    .child(div().text_size(px(12.0)).text_color(T.text3).child("Les agents sont bloqués tant que le fichier n'est pas corrigé."));
             }
             Some(Ok(p)) => {
                 let list = |items: &[String], all: &str| if items.is_empty() { all.to_owned() } else { items.join(", ") };
@@ -308,11 +306,7 @@ impl Workspace {
                 "{} événement(s) : qui a lancé quel agent, avec quelles commandes et quels fichiers.{}",
                 self.team.journal.len(),
                 if blocked > 0 { format!(" {blocked} blocage(s).") } else { String::new() }
-            )))
-            .child(div().flex().child(button("journal-open", "Ouvrir le journal", false).on_click(cx.listener(|this, _, _, cx| {
-                this.right = RightPanel::Journal;
-                cx.notify();
-            }))));
+)));
 
         div().id("team").flex_1().min_h_0().overflow_y_scroll().pt_1().flex().flex_col().child(rules).child(spending).child(journal).into_any_element()
     }

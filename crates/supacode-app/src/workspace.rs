@@ -1128,7 +1128,7 @@ impl Workspace {
                     .flex_col()
                     .gap_1p5()
                     .child(div().font_weight(FontWeight::MEDIUM).child("Aucun projet"))
-                    .child(div().text_size(px(12.0)).text_color(T.text2).child("Ajoute tes projets avec « Ajouter un projet » en bas : un dossier de ta machine, ou un projet sur lequel tu as déjà travaillé avec Claude Code.")),
+                    .child(div().text_size(px(12.0)).text_color(T.text2).child("Ajoute tes projets avec le bouton ci-dessus : un dossier de ta machine, ou un projet sur lequel tu as déjà travaillé avec Claude Code.")),
             );
         }
         let active_conversation = self.active_tab().map(|t| t.conversation_id.clone());
@@ -1252,34 +1252,13 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(list.pt_1())
-            .child(
-                div().border_t_1().border_color(T.border).p_2().when(self.adding, |d| d.child(self.render_add_menu(cx))).child(
-                    div()
-                        .id("add-project")
-                        .h(px(30.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(6.0))
-                        .text_color(T.text2)
-                        .cursor_pointer()
-                        .hover(|d| d.bg(T.hover))
-                        .when(self.adding, |d| d.bg(T.hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.adding = !this.adding;
-                            cx.notify();
-                        }))
-                        .child(icon(icons::PLUS).size(px(14.0)))
-                        .child("Ajouter un projet"),
-                ),
-            );
+            .child(list.pt_1());
         let body = match self.sidebar_tab {
             SidebarTab::Projects => projects_tab.into_any_element(),
             SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
             SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
+        let actions = self.render_sidebar_actions(cx);
         let (title, count) = match self.sidebar_tab {
             SidebarTab::Projects => ("Projets", self.projects.len()),
             SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
@@ -1312,26 +1291,79 @@ impl Workspace {
                             .child(section_label(title).flex_1())
                             .when(count > 0, |d| d.child(div().text_size(px(11.0)).text_color(T.text3).child(count.to_string()))),
                     )
-                    .child(
-                        div()
-                            .id("new-conversation")
-                            .h(px(30.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap_1p5()
-                            .rounded(px(6.0))
-                            .bg(T.accent_bg)
-                            .text_color(T.accent_on)
-                            .font_weight(FontWeight::MEDIUM)
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.9))
-                            .on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx)))
-                            .child(icon(icons::PLUS).size(px(14.0)))
-                            .child("Nouvelle conversation"),
-                    ),
+                    .child(actions)
+                    .when(self.adding, |d| d.child(self.render_add_menu(cx))),
             )
             .child(body)
+    }
+
+    /// Boutons du haut de la barre latérale : l'action principale de l'onglet ouvert.
+    fn render_sidebar_actions(&self, cx: &mut Context<Self>) -> Div {
+        let primary = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w_0()
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .rounded(px(6.0))
+                .bg(T.accent_bg)
+                .text_color(T.accent_on)
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .hover(|d| d.opacity(0.9))
+                .child(icon(icons::PLUS).size(px(14.0)))
+                .child(div().truncate().child(label))
+        };
+        let add_project = |label: &'static str, primary_style: bool| {
+            let button = if primary_style {
+                primary("add-project", label)
+            } else {
+                div()
+                    .id("add-project")
+                    .flex_shrink_0()
+                    .h(px(30.0))
+                    .px_2p5()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(T.border_strong)
+                    .text_color(T.text)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.hover))
+                    .when(self.adding, |d| d.bg(T.hover))
+                    .child(icon(icons::PLUS).size(px(13.0)))
+                    .child(label)
+            };
+            button.on_click(cx.listener(|this, _, _, cx| {
+                this.adding = !this.adding;
+                cx.notify();
+            }))
+        };
+        let row = div().flex().gap_2();
+        // Sans projet, rien d'autre n'est possible : on commence par là.
+        if self.projects.is_empty() {
+            return row.child(add_project("Ajouter un projet", true));
+        }
+        match self.sidebar_tab {
+            SidebarTab::Projects => row
+                .child(primary("new-conversation", "Nouvelle conversation").on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx))))
+                .child(add_project("Projet", false)),
+            SidebarTab::Workflows => row.child(primary("new-workflow", "Nouveau workflow").on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))),
+            SidebarTab::Team => match &self.team.policy {
+                None => row.child(primary("policy-create", "Créer les règles d'équipe").on_click(cx.listener(|this, _, _, cx| this.create_policy(cx)))),
+                Some(Err(_)) => row.child(primary("policy-fix", "Corriger les règles").on_click(cx.listener(|this, _, _, cx| this.edit_policy(cx)))),
+                Some(Ok(_)) => row.child(primary("journal-open", "Ouvrir le journal").on_click(cx.listener(|this, _, _, cx| {
+                    this.right = RightPanel::Journal;
+                    cx.notify();
+                }))),
+            },
+        }
     }
 
     /// Barre d'icônes tout à gauche : choisit l'onglet de la barre latérale.
@@ -1646,24 +1678,6 @@ impl Workspace {
             })
             .children(picker)
             .child(body)
-            .child(
-                div().border_t_1().border_color(T.border).p_2().child(
-                    div()
-                        .id("new-workflow")
-                        .h(px(30.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(6.0))
-                        .text_color(T.text2)
-                        .cursor_pointer()
-                        .hover(|d| d.bg(T.hover))
-                        .on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))
-                        .child(icon(icons::PLUS).size(px(14.0)))
-                        .child("Nouveau workflow"),
-                ),
-            )
     }
 
     fn render_center(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
