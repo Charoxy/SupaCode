@@ -23,6 +23,7 @@ use crate::preview::{self, ChangedFile, LineKind};
 use crate::terminal::{Command, TerminalEvent, TerminalView};
 use crate::theme::{self, DARK as T};
 
+mod extensions;
 mod prompts;
 mod runs;
 mod team;
@@ -30,6 +31,7 @@ mod team;
 use runs::WorkflowRun;
 use supacode_core::audit::{self, kind};
 use supacode_core::costs::Scanner;
+use extensions::{ExtTab, Extensions};
 use prompts::{Pending, PromptView};
 use supacode_core::prompts::PromptFile;
 use team::{JournalFilter, TeamData};
@@ -62,6 +64,7 @@ enum SidebarTab {
     Projects,
     Workflows,
     Prompts,
+    Extensions,
     Team,
 }
 
@@ -171,6 +174,8 @@ pub struct Workspace {
     prompt_view: Option<PromptView>,
     /// Saisie demandée avant un lancement.
     ask: Option<(Entity<crate::ask::AskDialog>, Pending)>,
+    /// Skills et serveurs MCP.
+    extensions: Extensions,
     /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
     mcp_config: Option<PathBuf>,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
@@ -222,6 +227,7 @@ impl Workspace {
             prompts: Ok(Vec::new()),
             prompt_view: None,
             ask: None,
+            extensions: Extensions::new(window, cx),
             mcp_config: None,
             editor: None,
             opened: None,
@@ -409,6 +415,7 @@ impl Workspace {
         };
         self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
         self.load_prompts();
+        self.refresh_extensions(cx);
         self.watch_saves(project.path, cx);
         self.refresh_team(cx);
         cx.notify();
@@ -559,14 +566,15 @@ impl Workspace {
             return;
         }
         let mut args = Vec::new();
-        if let Some(settings) = policy.as_ref().and_then(|p| p.claude_settings()) {
-            args.extend(["--settings".to_owned(), settings]);
+        let from_policy = policy.as_ref().and_then(|p| p.claude_settings()).and_then(|s| serde_json::from_str(&s).ok());
+        if let Some(settings) = supacode_core::extensions::merge_settings(from_policy, self.extension_settings(&project.path)) {
+            args.extend(["--settings".to_owned(), settings.to_string()]);
         }
         // Modèles restreints : le premier modèle Claude permis.
         if let Some(model) = policy.as_ref().and_then(|p| p.models.iter().find(|m| m.starts_with("claude") && !m.contains('*')).cloned()) {
             args.extend(["--model".to_owned(), model]);
         }
-        let browser_allowed = policy.as_ref().is_none_or(|p| p.browser);
+        let browser_allowed = policy.as_ref().is_none_or(|p| p.browser) && self.browser_tools_enabled();
         if let Some(config) = self.mcp_config.as_ref().filter(|_| browser_allowed) {
             // Les deux options prennent plusieurs valeurs : chacune doit être suivie d'une autre option.
             args.extend(["--mcp-config".to_owned(), config.display().to_string(), "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
@@ -1276,6 +1284,7 @@ impl Workspace {
             SidebarTab::Projects => projects_tab.into_any_element(),
             SidebarTab::Workflows => self.render_workflows(cx).into_any_element(),
             SidebarTab::Prompts => self.render_prompts(cx).into_any_element(),
+            SidebarTab::Extensions => self.render_extensions(cx).into_any_element(),
             SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
         let actions = self.render_sidebar_actions(cx);
@@ -1283,6 +1292,7 @@ impl Workspace {
             SidebarTab::Projects => ("Projets", self.projects.len()),
             SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
             SidebarTab::Prompts => ("Prompts", self.prompts.as_ref().map(|p| p.len()).unwrap_or(0)),
+            SidebarTab::Extensions => ("Extensions", 0),
             SidebarTab::Team => ("Équipe", 0),
         };
 
@@ -1377,6 +1387,11 @@ impl Workspace {
                 .child(add_project("Projet", false)),
             SidebarTab::Workflows => row.child(primary("new-workflow", "Nouveau workflow").on_click(cx.listener(|this, _, window, cx| this.open_creator(window, cx)))),
             SidebarTab::Prompts => row.child(primary("new-prompt", "Nouveau prompt").on_click(cx.listener(|this, _, _, cx| this.new_prompt(cx)))),
+            SidebarTab::Extensions => row.child(primary("add-skills", "Ajouter des skills").on_click(cx.listener(|this, _, window, cx| {
+                this.extensions.tab = ExtTab::Library;
+                this.extensions.query.update(cx, |q, cx| q.focus(window, cx));
+                cx.notify();
+            }))),
             SidebarTab::Team => match &self.team.policy {
                 None => row.child(primary("policy-create", "Créer les règles d'équipe").on_click(cx.listener(|this, _, _, cx| this.create_policy(cx)))),
                 Some(Err(_)) => row.child(primary("policy-fix", "Corriger les règles").on_click(cx.listener(|this, _, _, cx| this.edit_policy(cx)))),
@@ -1405,6 +1420,7 @@ impl Workspace {
             .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
             .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
             .child(self.activity_button("activity-prompts", icons::QUOTE, SidebarTab::Prompts, false, cx))
+            .child(self.activity_button("activity-extensions", icons::PUZZLE, SidebarTab::Extensions, false, cx))
             .child(self.activity_button("activity-team", icons::SHIELD, SidebarTab::Team, self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED), cx))
             .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
             .child({
@@ -1446,6 +1462,9 @@ impl Workspace {
                 this.sidebar_tab = tab;
                 if tab == SidebarTab::Team {
                     this.refresh_team(cx);
+                }
+                if tab == SidebarTab::Extensions {
+                    this.refresh_extensions(cx);
                 }
                 this.adding = false;
                 this.picking_project = false;

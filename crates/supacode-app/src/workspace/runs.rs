@@ -279,6 +279,7 @@ impl Workspace {
             }
         };
         let claude_id = self.projects.iter().find(|p| same_path(&p.path, &project)).map(|p| p.id.clone()).unwrap_or_default();
+        let claude_settings = self.extension_settings(&project);
         let scanner = self.scanner.clone();
         let root = project.clone();
         std::thread::spawn(move || {
@@ -289,7 +290,7 @@ impl Workspace {
             } else {
                 engine::Spent::default()
             };
-            let options = RunOptions { cwd: root, context, cancel, policy, spent, journal: true };
+            let options = RunOptions { cwd: root, context, cancel, policy, spent, journal: true, claude_settings };
             engine::run(&workflow, &options, &ChannelHost(tx));
         });
 

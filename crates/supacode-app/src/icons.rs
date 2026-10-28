@@ -35,6 +35,7 @@ pub const MAXIMIZE: &str = svg!(r#"<rect stroke-width="1.2" x="3.5" y="3.5" widt
 pub const RESTORE: &str = svg!(r#"<rect stroke-width="1.2" x="3.5" y="5.5" width="7" height="7" rx="1"/><path stroke-width="1.2" d="M5.5 5.5V4.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1"/>"#);
 pub const SHIELD: &str = svg!(r#"<path stroke-width="1.4" d="M8 1.8l5 1.9v4c0 3.2-2.1 5.6-5 6.5-2.9-.9-5-3.3-5-6.5v-4z"/><path stroke-width="1.4" d="M5.8 8l1.6 1.6 2.9-3"/>"#);
 pub const QUOTE: &str = svg!(r#"<path stroke-width="1.4" d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H8l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/><path stroke-width="1.4" d="M5 6.5h6M5 8.5h4"/>"#);
+pub const PUZZLE: &str = svg!(r#"<path stroke-width="1.4" d="M6 2.5a1.5 1.5 0 0 1 3 0V4h3a1 1 0 0 1 1 1v3h-1.5a1.5 1.5 0 0 0 0 3H13v2.5a1 1 0 0 1-1 1H9V13a1.5 1.5 0 0 0-3 0v1.5H3a1 1 0 0 1-1-1V10h1.5a1.5 1.5 0 0 0 0-3H2V5a1 1 0 0 1 1-1h3z"/>"#);
 pub const APPROVE: &str = svg!(r#"<circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/>"#);
 /// Le « S » du logo (posé sur un carré arrondi couleur accent : GPUI dessine les SVG d'une seule couleur).
 const LOGO_S: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13 7.2c-.6-1-1.7-1.5-3-1.5-1.7 0-2.9.9-2.9 2.1 0 2.9 6 1.6 6 4.4 0 1.3-1.3 2.2-3.1 2.2-1.4 0-2.5-.6-3.1-1.6"/></svg>"#;

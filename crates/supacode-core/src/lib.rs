@@ -6,6 +6,7 @@ pub mod claude;
 pub mod costs;
 pub mod edit;
 pub mod engine;
+pub mod extensions;
 pub mod generate;
 pub mod policy;
 pub mod process;
