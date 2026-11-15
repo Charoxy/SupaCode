@@ -10,7 +10,7 @@ SupaCode est un IDE de bureau écrit en Rust ([GPUI](https://www.gpui.rs/)), con
 
 Autour d'eux, SupaCode ajoute ce qui manque pour travailler sérieusement avec des agents : des workflows qui font office de CI/CD en local, des prompts versionnés avec git, un navigateur que les agents savent piloter, des tâches en arrière-plan à comparer, des règles d'équipe, des coûts et un journal d'audit.
 
-Open source, licence MIT. Les contributions sont les bienvenues.
+Logiciel libre sous licence GPL v3 : tu peux l'utiliser, le modifier et le partager, et ses versions modifiées restent libres. Les contributions sont les bienvenues.
 
 ## Ce que fait SupaCode
 
@@ -154,8 +154,8 @@ cargo test --workspace
 npm test
 ```
 
-L'intégration continue (GitHub Actions) fait le build et les tests Rust et TypeScript à chaque push. Le code, les commentaires et l'interface sont en français.
+L'intégration continue (GitHub Actions) fait le build et les tests Rust et TypeScript à chaque push. Le code, les commentaires et l'interface sont en français. En contribuant, tu acceptes que ta contribution soit publiée sous la licence du projet.
 
 ## Licence
 
-[MIT](LICENSE) © Charoxy
+© 2026 Charoxy. SupaCode est un logiciel libre, publié sous la [licence publique générale GNU, version 3](LICENSE) ou toute version ultérieure (GPL-3.0-or-later). Tu peux le redistribuer et le modifier selon ses termes ; une version modifiée que tu distribues doit rester sous la même licence et fournir son code source. Il est distribué sans aucune garantie.

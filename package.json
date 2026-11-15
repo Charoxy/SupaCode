@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "SupaCode : un IDE pour coder avec l'IA, avec un orchestrateur qui choisit le bon agent et le bon modèle.",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "workspaces": [
     "packages/*"

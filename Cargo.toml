@@ -5,7 +5,7 @@ members = ["crates/supacode-core", "crates/supacode-app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 authors = ["Charoxy <charoxy59@gmail.com>"]
 
 [workspace.dependencies]
