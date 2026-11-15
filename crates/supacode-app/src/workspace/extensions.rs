@@ -1,4 +1,4 @@
-//! Onglet Extensions : skills installés (activés ou non), bibliothèque (SkillsMP et skills
+//! Onglet Skills : skills installés (activés ou non), bibliothèque (SkillsMP et skills
 //! officiels d'Anthropic, ou n'importe quel dossier GitHub) et serveurs MCP.
 //! Les désactivations s'appliquent aux sessions lancées par SupaCode (`--settings`).
 

@@ -23,9 +23,11 @@ use crate::preview::{self, ChangedFile, LineKind};
 use crate::terminal::{Command, TerminalEvent, TerminalView};
 use crate::theme::{self, DARK as T};
 
+mod agents;
 mod extensions;
 mod prompts;
 mod review;
+mod roblox;
 mod runs;
 mod tasks;
 mod team;
@@ -58,11 +60,18 @@ struct Tab {
     /// Vrai tant que Claude Code n'a pas encore enregistré la conversation.
     unsaved: bool,
     title: String,
+    /// Sujet en cours donné par Claude Code dans le titre du terminal ; prime sur `title`.
+    live_title: Option<String>,
+    /// Le titre du terminal porte l'animation « en train de travailler » de Claude Code.
+    busy_title: bool,
     terminal: Entity<TerminalView>,
     /// Fichiers modifiés pendant cette conversation, du plus récent au plus ancien.
-    changed: Vec<ChangedFile>,
+    /// Partagés (`Rc`) : le rendu, à chaque image, ne recopie pas les diffs.
+    changed: Vec<std::rc::Rc<ChangedFile>>,
     selected_file: usize,
     last_output: Option<Instant>,
+    /// Messages d'autres agents pas encore remis (voir `agents::deliver_messages`).
+    inbox: Vec<String>,
 }
 
 /// Onglet de la barre latérale.
@@ -72,9 +81,56 @@ enum SidebarTab {
     Workflows,
     Prompts,
     Tasks,
+    /// Skills, plugins et serveurs MCP (module `extensions`).
     Extensions,
+    Roblox,
     Team,
 }
+
+impl SidebarTab {
+    /// Ordre de la barre d'activité.
+    const ALL: [SidebarTab; 7] = [Self::Projects, Self::Workflows, Self::Prompts, Self::Tasks, Self::Extensions, Self::Roblox, Self::Team];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Projects => "Projets",
+            Self::Workflows => "Workflows",
+            Self::Prompts => "Prompts",
+            Self::Tasks => "Tâches",
+            Self::Extensions => "Skills",
+            Self::Roblox => "Roblox",
+            Self::Team => "Équipe",
+        }
+    }
+
+    /// Clé enregistrée dans `disposition.json` pour les outils masqués.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Projects => "projets",
+            Self::Workflows => "workflows",
+            Self::Prompts => "prompts",
+            Self::Tasks => "taches",
+            Self::Extensions => "skills",
+            Self::Roblox => "roblox",
+            Self::Team => "equipe",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Projects => icons::FOLDER,
+            Self::Workflows => icons::WORKFLOW,
+            Self::Prompts => icons::QUOTE,
+            Self::Tasks => icons::LAYERS,
+            Self::Extensions => icons::PUZZLE,
+            Self::Roblox => icons::CUBE,
+            Self::Team => icons::SHIELD,
+        }
+    }
+}
+
+/// Clé du navigateur dans la liste des outils masqués (il n'a pas d'onglet latéral).
+const BROWSER_TOOL: &str = "navigateur";
 
 /// Séparateur glissé entre deux panneaux.
 #[derive(Clone, Copy)]
@@ -89,16 +145,42 @@ impl Render for Split {
     }
 }
 
+/// Séparateur glissé dans la grille : entre deux lignes, ou entre deux cases d'une ligne.
+#[derive(Clone, Copy)]
+enum GridSplit {
+    Row(usize),
+    Col(usize, usize),
+}
+
+impl Render for GridSplit {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Bande de 6 px entre deux cases de la grille ; elle se glisse pour les redimensionner.
+fn grid_splitter(id: impl Into<ElementId>, split: GridSplit, horizontal: bool) -> Stateful<Div> {
+    let bar = div().id(id).flex_shrink_0().flex().items_center().justify_center().group("grid-split");
+    let bar = if horizontal { bar.h(px(6.0)).w_full().cursor_row_resize() } else { bar.w(px(6.0)).h_full().cursor_col_resize() };
+    let line = div().rounded_full().bg(T.border_strong).opacity(0.0).group_hover("grid-split", |d| d.opacity(1.0));
+    let line = if horizontal { line.h(px(2.0)).w(px(40.0)) } else { line.w(px(2.0)).h(px(40.0)) };
+    bar.on_drag(split, |split, _, _, cx| cx.new(|_| *split)).child(line)
+}
+
 /// Largeurs des panneaux, gardées d'une session à l'autre.
 #[derive(Clone, Copy)]
 struct Layout {
     sidebar: f32,
     right: f32,
+    /// Conversations affichées en grille plutôt qu'une à la fois.
+    grid: bool,
+    /// Barre d'outils de gauche (barre d'activité et barre latérale) affichée.
+    toolbar: bool,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { sidebar: 260.0, right: 576.0 }
+        Self { sidebar: 260.0, right: 576.0, grid: false, toolbar: true }
     }
 }
 
@@ -119,6 +201,8 @@ enum RightPanel {
     Tasks(usize),
     /// Fichier ouvert depuis la palette.
     File,
+    /// État de toutes les fenêtres d'agents.
+    Agents,
 }
 
 /// Fichier affiché en lecture dans le panneau de droite.
@@ -149,6 +233,8 @@ pub struct Workspace {
     selected_project: Option<String>,
     tabs: Vec<Tab>,
     active: Option<usize>,
+    /// Dernier agent actif de chaque projet (clé `project_key`) : on y revient en changeant de projet.
+    last_active: HashMap<String, usize>,
     next_tab_id: usize,
     workflows: Result<Vec<WorkflowFile>, String>,
     sidebar_tab: SidebarTab,
@@ -159,6 +245,10 @@ pub struct Workspace {
     picking_project: bool,
     layout: Layout,
     layout_dirty: bool,
+    /// Grille : seule la conversation active est affichée, en grand.
+    grid_zoomed: bool,
+    /// Grille : le code modifié reste affiché à droite (masqué par défaut pour laisser la place).
+    grid_code: bool,
     runs: Vec<WorkflowRun>,
     next_run_id: usize,
     right: RightPanel,
@@ -184,6 +274,8 @@ pub struct Workspace {
     /// Bibliothèque de prompts du projet des workflows.
     prompts: Result<Vec<PromptFile>, String>,
     prompt_view: Option<PromptView>,
+    /// Section « Bibliothèque d'Anthropic » de l'onglet Prompts dépliée.
+    presets_open: bool,
     /// Saisie demandée avant un lancement.
     ask: Option<(Entity<crate::ask::AskDialog>, Pending)>,
     /// Skills et serveurs MCP.
@@ -201,6 +293,17 @@ pub struct Workspace {
     comment_input: Entity<InputState>,
     /// Fichier `--mcp-config` qui donne aux agents les outils du navigateur.
     mcp_config: Option<PathBuf>,
+    /// Adresse du serveur MCP ; chaque fenêtre d'agent la reçoit avec son numéro.
+    mcp_url: Option<String>,
+    /// Dernier état connu de chaque agent (pour prévenir quand l'un d'eux a fini).
+    agent_states: HashMap<usize, (agents::AgentState, Instant)>,
+    /// Proportions de la grille (lignes, puis cases de chaque ligne), pour un nombre de cases.
+    grid_weights: Option<(usize, Vec<f32>, Vec<Vec<f32>>)>,
+    /// Outils retirés de la barre d'activité (clés de `SidebarTab::key`, ou `BROWSER_TOOL`).
+    hidden_tools: HashSet<String>,
+    /// Menu « Outils affichés » ouvert.
+    tools_menu: bool,
+    roblox: roblox::RobloxState,
     /// Focus de la fenêtre quand aucune conversation n'est ouverte (raccourcis clavier).
     focus: FocusHandle,
     watcher: Option<notify::RecommendedWatcher>,
@@ -222,6 +325,7 @@ impl Workspace {
             selected_project: None,
             tabs: Vec::new(),
             active: None,
+            last_active: HashMap::new(),
             next_tab_id: 0,
             workflows: Ok(Vec::new()),
             sidebar_tab: SidebarTab::Projects,
@@ -230,6 +334,8 @@ impl Workspace {
             picking_project: false,
             layout: load_layout(),
             layout_dirty: false,
+            grid_zoomed: false,
+            grid_code: false,
             runs: Vec::new(),
             next_run_id: 0,
             right: RightPanel::Code,
@@ -249,6 +355,7 @@ impl Workspace {
             toast: None,
             prompts: Ok(Vec::new()),
             prompt_view: None,
+            presets_open: true,
             ask: None,
             extensions: Extensions::new(window, cx),
             tasks: Vec::new(),
@@ -269,6 +376,12 @@ impl Workspace {
                 input
             },
             mcp_config: None,
+            mcp_url: None,
+            agent_states: HashMap::new(),
+            grid_weights: None,
+            hidden_tools: load_hidden_tools(),
+            tools_menu: false,
+            roblox: Default::default(),
             editor: None,
             opened: None,
             focus: cx.focus_handle(),
@@ -288,8 +401,13 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_millis(700)).await;
                 ticks += 1;
-                let alive = this.update(cx, |this, cx| {
+                let alive = this.update_in(cx, |this, window, cx| {
                     this.pulse = !this.pulse;
+                    this.watch_agents(window.is_window_active(), cx);
+                    // L'onglet Roblox ouvert suit Rojo et Studio (lancés ou fermés hors de SupaCode).
+                    if ticks % 8 == 0 && this.sidebar_open && this.layout.toolbar && this.sidebar_tab == SidebarTab::Roblox {
+                        this.refresh_roblox(cx);
+                    }
                     if ticks % 43 == 0 {
                         this.refresh_projects(cx);
                     } else if ticks % 4 == 0 {
@@ -418,7 +536,7 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self._tasks.push(task);
+        task.detach();
     }
 
     fn load_conversations(&mut self, project: Project, cx: &mut Context<Self>) {
@@ -443,22 +561,59 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self._tasks.push(task);
+        task.detach();
     }
 
     /// Workflows du projet courant (onglet actif, sinon projet sélectionné).
+    /// Lit tout en arrière-plan (git, fichiers du projet, `~/.claude.json`) : changer de
+    /// projet ou d'onglet ne bloque jamais l'interface.
     fn load_workflows(&mut self, cx: &mut Context<Self>) {
-        self.branch = self.current_project().and_then(|p| preview::git_branch(&p.path));
-        let Some(project) = self.workflows_project() else {
-            self.workflows = Ok(Vec::new());
-            return;
-        };
-        self.workflows = load_workflows(&project.path).map_err(|e| format!("{e:#}"));
-        self.load_prompts();
-        self.refresh_extensions(cx);
-        self.watch_saves(project.path, cx);
-        self.refresh_team(cx);
-        cx.notify();
+        let current = self.current_project().map(|p| p.path);
+        let project = self.workflows_project().map(|p| p.path);
+        let settings = self.extensions.settings.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let (job_current, job_project) = (current.clone(), project.clone());
+            let (branch, skills, mcp, loaded) = cx
+                .background_executor()
+                .spawn(async move {
+                    let branch = job_current.as_deref().and_then(preview::git_branch);
+                    let skills = supacode_core::extensions::list_skills(job_current.as_deref(), &settings);
+                    let mcp = supacode_core::extensions::list_mcp(job_current.as_deref(), &settings);
+                    let loaded = job_project.as_deref().map(|root| (load_workflows(root).map_err(|e| format!("{e:#}")), supacode_core::prompts::load_all(root).map_err(|e| format!("{e:#}"))));
+                    (branch, skills, mcp, loaded)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Le projet a changé pendant la lecture : un chargement plus récent suit.
+                let now_current = this.current_project().map(|p| p.path);
+                let now_project = this.workflows_project().map(|p| p.path);
+                let same = |a: &Option<PathBuf>, b: &Option<PathBuf>| match (a, b) {
+                    (Some(a), Some(b)) => same_path(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same(&current, &now_current) || !same(&project, &now_project) {
+                    return;
+                }
+                this.branch = branch;
+                this.extensions.skills = skills;
+                this.extensions.mcp = mcp;
+                match (project, loaded) {
+                    (Some(root), Some((workflows, prompts))) => {
+                        this.workflows = workflows;
+                        this.prompts = prompts;
+                        this.watch_saves(root, cx);
+                    }
+                    _ => {
+                        this.workflows = Ok(Vec::new());
+                        this.prompts = Ok(Vec::new());
+                    }
+                }
+                this.refresh_team(cx);
+                cx.notify();
+            });
+        });
+        task.detach();
     }
 
     /// Déclencheurs `{ "save": "<glob>" }` des workflows du projet courant.
@@ -545,18 +700,46 @@ impl Workspace {
 
     // — Actions
 
-    fn toggle_project(&mut self, project: Project, cx: &mut Context<Self>) {
+    fn toggle_project(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
         let key = project_key(&project);
-        self.selected_project = Some(key.clone());
         self.workflow_project = None;
         if !self.expanded.remove(&key) {
-            self.expanded.insert(key);
+            self.expanded.insert(key.clone());
             self.load_conversations(project, cx);
         }
-        if self.active.is_none() {
-            self.load_workflows(cx);
+        self.show_project(key, window, cx);
+    }
+
+    /// Agents ouverts sur le projet affiché (celui de la conversation active, sinon le projet choisi).
+    fn project_tabs(&self) -> Vec<&Tab> {
+        let Some(key) = self.current_project().map(|p| project_key(&p)) else { return Vec::new() };
+        self.tabs.iter().filter(|t| project_key(&t.project) == key).collect()
+    }
+
+    /// Affiche le projet : son dernier agent actif, sinon l'accueil pour en lancer un.
+    /// Les agents des autres projets continuent de tourner en arrière-plan.
+    fn show_project(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_project = Some(key.clone());
+        if self.active_tab().is_some_and(|t| project_key(&t.project) == key) {
+            cx.notify();
+            return;
         }
-        cx.notify();
+        let in_project = |id: usize| self.tabs.iter().any(|t| t.id == id && project_key(&t.project) == key);
+        let next = self.last_active.get(&key).copied().filter(|id| in_project(*id)).or_else(|| self.tabs.iter().find(|t| project_key(&t.project) == key).map(|t| t.id));
+        self.grid_zoomed = false;
+        match next {
+            Some(id) => self.activate(id, window, cx),
+            None => {
+                self.active = None;
+                self.watcher = None;
+                self.checkpoints_open = false;
+                self.checkpoint_list = Vec::new();
+                self.line_comment = None;
+                window.focus(&self.focus, cx);
+                self.load_workflows(cx);
+                cx.notify();
+            }
+        }
     }
 
     /// Ouvre une conversation (ou la ramène au premier plan) ; sans conversation : une nouvelle.
@@ -607,7 +790,12 @@ impl Workspace {
         }
         let mut args = Vec::new();
         let from_policy = policy.as_ref().and_then(|p| p.claude_settings()).and_then(|s| serde_json::from_str(&s).ok());
-        if let Some(settings) = supacode_core::extensions::merge_settings(from_policy, self.extension_settings(&project.path)) {
+        let mut settings = supacode_core::extensions::merge_settings(from_policy, self.extension_settings(&project.path));
+        // Messages des autres agents lus en direct (voir `mcp::agent_hooks`).
+        if let Some(url) = &self.mcp_url {
+            settings = supacode_core::extensions::merge_settings(settings, Some(mcp::agent_hooks(url, self.next_tab_id)));
+        }
+        if let Some(settings) = settings {
             args.extend(["--settings".to_owned(), settings.to_string()]);
         }
         // Modèles restreints : le premier modèle Claude permis.
@@ -615,9 +803,14 @@ impl Workspace {
             args.extend(["--model".to_owned(), model]);
         }
         let browser_allowed = policy.as_ref().is_none_or(|p| p.browser) && self.browser_tools_enabled();
-        if let Some(config) = self.mcp_config.as_ref().filter(|_| browser_allowed) {
-            // Les deux options prennent plusieurs valeurs : chacune doit être suivie d'une autre option.
-            args.extend(["--mcp-config".to_owned(), config.display().to_string(), "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
+        // Chaque fenêtre a sa propre adresse : le serveur sait quel agent l'appelle.
+        let agent_id = self.next_tab_id;
+        if let Some(url) = &self.mcp_url {
+            let url = format!("{url}?agent={agent_id}{}", if browser_allowed { "" } else { ",browser=0" });
+            let config = serde_json::json!({ "mcpServers": { "supacode": { "type": "http", "url": url } } }).to_string();
+            // Les options à plusieurs valeurs doivent chacune être suivies d'une autre option.
+            args.extend(["--mcp-config".to_owned(), config, "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
+            args.extend(["--append-system-prompt".to_owned(), self.agent_prompt(agent_id)]);
         }
         args.extend(match &conversation {
             Some(_) => ["--resume".to_owned(), session.clone()],
@@ -646,7 +839,21 @@ impl Workspace {
             let Some(tab) = this.tabs.iter_mut().find(|t| t.id == id) else { return };
             match event {
                 TerminalEvent::Submitted => {}
-                TerminalEvent::Output => tab.last_output = Some(Instant::now()),
+                // Le terminal se redessine seul ; l'espace de travail ne change que si l'onglet
+                // passe à « en cours » (le ticker le ramène ensuite au repos).
+                TerminalEvent::Output => {
+                    let was_active = is_active(tab);
+                    tab.last_output = Some(Instant::now());
+                    if was_active {
+                        return;
+                    }
+                }
+                // Sujet en cours donné par Claude Code (il change après un /clear et une nouvelle tâche).
+                TerminalEvent::Title => {
+                    let raw = tab.terminal.read(cx).title.clone().unwrap_or_default();
+                    tab.busy_title = raw.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+                    tab.live_title = clean_title(&raw);
+                }
                 // La conversation vient d'être enregistrée par Claude Code : on rafraîchit la liste.
                 TerminalEvent::Exited => this.refresh_projects(cx),
             }
@@ -655,18 +862,57 @@ impl Workspace {
         .detach();
         let title = conversation.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "Nouvelle conversation".into());
         let unsaved = conversation.is_none();
-        self.tabs.push(Tab { id, project: project.clone(), conversation_id: session, unsaved, title, terminal, changed: Vec::new(), selected_file: 0, last_output: None });
+        self.tabs.push(Tab { id, project: project.clone(), conversation_id: session, unsaved, title, live_title: None, busy_title: false, terminal, changed: Vec::new(), selected_file: 0, last_output: None, inbox: Vec::new() });
         self.selected_project = Some(project_key(&project));
+        // Une nouvelle conversation prend sa place dans la grille.
+        self.grid_zoomed = false;
         self.activate(id, window, cx);
+    }
+
+    /// Passe de l'affichage par onglets à la grille, et inversement.
+    fn toggle_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout.grid = !self.layout.grid;
+        self.grid_zoomed = false;
+        self.grid_code = false;
+        save_layout(self.layout);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Affiche ou masque le panneau de droite en mode grille.
+    fn toggle_grid_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.grid_code || self.right != RightPanel::Code {
+            self.grid_code = false;
+            self.right = RightPanel::Code;
+        } else {
+            self.grid_code = true;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_tab() {
+            let focus = tab.terminal.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        }
     }
 
     fn activate(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = Some(id);
+        if let Some(key) = self.tabs.iter().find(|t| t.id == id).map(|t| project_key(&t.project)) {
+            self.last_active.insert(key.clone(), id);
+            self.selected_project = Some(key);
+        }
         self.workflow_project = None;
         self.checkpoints_open = false;
         self.line_comment = None;
-        self.checkpoint_list = self.tabs.iter().find(|t| t.id == id).map(|t| supacode_core::git::checkpoints(&t.project.path, &t.conversation_id)).unwrap_or_default();
-        self.right = RightPanel::Code;
+        self.checkpoint_list = Vec::new();
+        self.load_checkpoints(cx);
+        // En grille, changer de case ne ferme pas ce qui est ouvert à droite (navigateur, exécution…).
+        if !self.layout.grid {
+            self.right = RightPanel::Code;
+        }
         self.confirm_revert = false;
         if let Some(tab) = self.active_tab() {
             let focus = tab.terminal.read(cx).focus_handle().clone();
@@ -683,11 +929,17 @@ impl Workspace {
             let tab = self.tabs.remove(index);
             tab.terminal.read(cx).kill();
             if self.active == Some(id) {
+                let key = project_key(&tab.project);
                 self.active = None;
-                if let Some(next) = self.tabs.get(index.min(self.tabs.len().saturating_sub(1))).map(|t| t.id) {
+                // Le voisin dans le même projet : on reste sur le projet, même sans agent.
+                let siblings: Vec<usize> = self.tabs.iter().filter(|t| project_key(&t.project) == key).map(|t| t.id).collect();
+                let before = self.tabs[..index].iter().filter(|t| project_key(&t.project) == key).count();
+                if let Some(next) = siblings.get(before.min(siblings.len().saturating_sub(1))).copied() {
                     self.activate(next, window, cx);
                 } else {
                     self.watcher = None;
+                    self.checkpoint_list = Vec::new();
+                    self.selected_project = Some(key);
                     window.focus(&self.focus, cx);
                 }
             }
@@ -720,7 +972,7 @@ impl Workspace {
                     if let Some(tab) = this.active_tab_mut() {
                         for file in changed {
                             tab.changed.retain(|f| f.path != file.path);
-                            tab.changed.insert(0, file);
+                            tab.changed.insert(0, std::rc::Rc::new(file));
                             tab.selected_file = 0;
                         }
                     }
@@ -853,13 +1105,10 @@ impl Workspace {
             }
             palette::Item::Project(project) => {
                 let key = project_key(&project);
-                self.selected_project = Some(key.clone());
-                if self.expanded.insert(key) {
+                if self.expanded.insert(key.clone()) {
                     self.load_conversations(project, cx);
                 }
-                if self.active.is_none() {
-                    self.load_workflows(cx);
-                }
+                self.show_project(key, window, cx);
                 self.refocus(window, cx);
             }
             palette::Item::Command { command, .. } => match command {
@@ -949,9 +1198,17 @@ impl Workspace {
             }
         };
         self.mcp_config = mcp::write_claude_config(&server.url);
+        self.mcp_url = Some(server.url.clone());
         let calls = server.calls;
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(call) = calls.recv().await {
+                if call.tool.starts_with("agent") {
+                    let Ok(result) = this.update(cx, |this, cx| this.agent_tool(call.agent, &call.tool, &call.args, cx)) else {
+                        break;
+                    };
+                    let _ = call.reply.send(result).await;
+                    continue;
+                }
                 let Ok(browser) = this.update_in(cx, |this, window, cx| {
                     if let Some(project) = this.current_project() {
                         let args = call.args.to_string();
@@ -1064,20 +1321,32 @@ impl Workspace {
         window.focus(&focus, cx);
     }
 
+    /// Lecture et coloration en arrière-plan : un gros fichier ne fige pas l'interface.
     fn open_file(&mut self, root: &Path, relative: String, cx: &mut Context<Self>) {
         let path = root.join(&relative);
-        let lines = match std::fs::metadata(&path) {
-            Ok(meta) if meta.len() > 2_000_000 => vec!["(fichier trop volumineux pour l'aperçu)".to_owned()],
-            _ => match std::fs::read(&path) {
-                Ok(bytes) if bytes.contains(&0) => vec!["(fichier binaire)".to_owned()],
-                Ok(bytes) => String::from_utf8_lossy(&bytes).lines().map(highlight::expand_tabs).collect(),
-                Err(err) => vec![format!("(lecture impossible : {err})")],
-            },
-        };
-        let spans = highlight::highlight(&relative, &lines);
-        self.opened = Some(OpenedFile { relative, lines, spans });
-        self.right = RightPanel::File;
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move {
+                    let lines = match std::fs::metadata(&path) {
+                        Ok(meta) if meta.len() > 2_000_000 => vec!["(fichier trop volumineux pour l'aperçu)".to_owned()],
+                        _ => match std::fs::read(&path) {
+                            Ok(bytes) if bytes.contains(&0) => vec!["(fichier binaire)".to_owned()],
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).lines().map(highlight::expand_tabs).collect(),
+                            Err(err) => vec![format!("(lecture impossible : {err})")],
+                        },
+                    };
+                    let spans = highlight::highlight(&relative, &lines);
+                    OpenedFile { relative, lines, spans }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.opened = Some(opened);
+                this.right = RightPanel::File;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn accept_selected(&mut self, cx: &mut Context<Self>) {
@@ -1089,11 +1358,23 @@ impl Workspace {
         }
         cx.notify();
     }
+
+    /// Accepte d'un coup tous les fichiers modifiés de la conversation active.
+    fn accept_all(&mut self, cx: &mut Context<Self>) {
+        self.confirm_revert = false;
+        if let Some(tab) = self.active_tab_mut() {
+            let count = tab.changed.len();
+            tab.changed.clear();
+            tab.selected_file = 0;
+            audit::record(&tab.project.path, kind::CONVERSATION, format!("{count} modification(s) acceptée(s) d'un coup"), serde_json::Value::Null, None);
+        }
+        cx.notify();
+    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self.active_tab().map(|t| format!("{} — {}", t.project.name, t.title)).unwrap_or_else(|| "SupaCode".into());
+        let title = self.active_tab().map(|t| format!("{} — {}", t.project.name, t.display_title())).unwrap_or_else(|| "SupaCode".into());
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
@@ -1115,7 +1396,28 @@ impl Render for Workspace {
             div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(84.0)).child(creator)
         });
         let titlebar = self.render_titlebar(window, cx);
-        let activity = self.render_activity_bar(cx);
+        let activity = self.layout.toolbar.then(|| self.render_activity_bar(cx));
+        // Menu des outils, au-dessus d'un fond transparent qui le referme au clic.
+        let tools_menu = (self.tools_menu && self.layout.toolbar).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(
+                    div()
+                        .id("tools-menu-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.tools_menu = false;
+                            cx.notify();
+                        })),
+                )
+                .child(self.render_tools_menu(cx))
+        });
         let browser_shown = self.right == RightPanel::Browser && self.palette.is_none() && self.creator.is_none() && self.editor.is_none() && self.ask.is_none();
         if let Some(browser) = &self.browser {
             browser.update(cx, |b, _| b.set_shown(browser_shown));
@@ -1123,7 +1425,7 @@ impl Render for Workspace {
         let ask = self.ask.as_ref().map(|(dialog, _)| {
             div().absolute().top_0().left_0().size_full().bg(rgba(0x0607099e)).flex().justify_center().items_start().pt(px(120.0)).child(dialog.clone())
         });
-        let sidebar = self.sidebar_open.then(|| self.render_sidebar(window, cx).into_any_element());
+        let sidebar = (self.sidebar_open && self.layout.toolbar).then(|| self.render_sidebar(window, cx).into_any_element());
         let (center, right) = if self.editor.is_none() {
             (Some(self.render_center(window, cx).into_any_element()), self.render_right(cx).map(|r| r.into_any_element()))
         } else {
@@ -1172,13 +1474,14 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(activity)
+                    .children(activity)
                     .when_some(sidebar, |d, sidebar| d.child(sidebar).child(splitter("split-sidebar", Split::Sidebar, T.panel)))
                     .when_some(self.editor.clone(), |d, editor| d.child(div().flex_1().min_w_0().child(editor)))
                     .children(center)
                     .when_some(right, |d, right| d.child(splitter("split-right", Split::Right, T.surface)).child(right)),
             )
             .child(self.render_status(cx))
+            .children(tools_menu)
             .children(overlay)
             .children(creator)
             .children(ask)
@@ -1229,7 +1532,7 @@ impl Workspace {
                     .when(selected, |d| d.bg(T.hover))
                     .hover(|d| d.bg(T.hover))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(toggle.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_project(toggle.clone(), window, cx)))
                     .child(icon(if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }).size(px(14.0)).text_color(T.text3))
                     .child(icon(icons::FOLDER).size(px(14.0)).text_color(T.text2))
                     .child(div().flex_1().min_w_0().truncate().font_weight(if open { FontWeight::MEDIUM } else { FontWeight::NORMAL }).child(project.name.clone()))
@@ -1280,7 +1583,7 @@ impl Workspace {
                 .tabs
                 .iter()
                 .filter(|t| t.unsaved && project_key(&t.project) == key && !conversations.iter().any(|c| c.id == t.conversation_id))
-                .map(|t| (t.id, t.title.clone(), Some(t.id) == self.active, is_active(t)))
+                .map(|t| (t.id, t.display_title(), Some(t.id) == self.active, is_active(t)))
                 .collect();
             for (tab_id, title, selected, busy) in &unsaved {
                 let tab_id = *tab_id;
@@ -1334,16 +1637,18 @@ impl Workspace {
             SidebarTab::Prompts => self.render_prompts(cx).into_any_element(),
             SidebarTab::Tasks => self.render_tasks(cx).into_any_element(),
             SidebarTab::Extensions => self.render_extensions(cx).into_any_element(),
+            SidebarTab::Roblox => self.render_roblox(cx).into_any_element(),
             SidebarTab::Team => self.render_team(cx).into_any_element(),
         };
         let actions = self.render_sidebar_actions(cx);
-        let (title, count) = match self.sidebar_tab {
-            SidebarTab::Projects => ("Projets", self.projects.len()),
-            SidebarTab::Workflows => ("Workflows", self.workflows.as_ref().map(|w| w.len()).unwrap_or(0)),
-            SidebarTab::Prompts => ("Prompts", self.prompts.as_ref().map(|p| p.len()).unwrap_or(0)),
-            SidebarTab::Extensions => ("Extensions", 0),
-            SidebarTab::Tasks => ("Tâches", self.tasks.iter().filter(|t| t.running()).count()),
-            SidebarTab::Team => ("Équipe", 0),
+        let title = self.sidebar_tab.label();
+        let count = match self.sidebar_tab {
+            SidebarTab::Projects => self.projects.len(),
+            SidebarTab::Workflows => self.workflows.as_ref().map(|w| w.len()).unwrap_or(0),
+            SidebarTab::Prompts => self.prompts.as_ref().map(|p| p.len()).unwrap_or(0),
+            SidebarTab::Tasks => self.tasks.iter().filter(|t| t.running()).count(),
+            SidebarTab::Roblox => self.roblox.projects.len(),
+            SidebarTab::Extensions | SidebarTab::Team => 0,
         };
 
         div()
@@ -1443,6 +1748,7 @@ impl Workspace {
                 this.extensions.query.update(cx, |q, cx| q.focus(window, cx));
                 cx.notify();
             }))),
+            SidebarTab::Roblox => row.child(primary("roblox-refresh", "Actualiser").on_click(cx.listener(|this, _, _, cx| this.refresh_roblox(cx)))),
             SidebarTab::Team => match &self.team.policy {
                 None => row.child(primary("policy-create", "Créer les règles d'équipe").on_click(cx.listener(|this, _, _, cx| this.create_policy(cx)))),
                 Some(Err(_)) => row.child(primary("policy-fix", "Corriger les règles").on_click(cx.listener(|this, _, _, cx| this.edit_policy(cx)))),
@@ -1457,26 +1763,24 @@ impl Workspace {
     /// Barre d'icônes tout à gauche : choisit l'onglet de la barre latérale.
     fn render_activity_bar(&self, cx: &mut Context<Self>) -> Div {
         let running = self.runs.iter().any(|r| r.running());
-        div()
-            .w(px(ACTIVITY_BAR))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .pt(px(6.0))
-            .bg(T.app)
-            .border_r_1()
-            .border_color(T.border)
-            .child(self.activity_button("activity-projects", icons::FOLDER, SidebarTab::Projects, false, cx))
-            .child(self.activity_button("activity-workflows", icons::WORKFLOW, SidebarTab::Workflows, running, cx))
-            .child(self.activity_button("activity-prompts", icons::QUOTE, SidebarTab::Prompts, false, cx))
-            .child(self.activity_button("activity-tasks", icons::LAYERS, SidebarTab::Tasks, self.tasks.iter().any(|t| t.running()), cx))
-            .child(self.activity_button("activity-extensions", icons::PUZZLE, SidebarTab::Extensions, false, cx))
-            .child(self.activity_button("activity-team", icons::SHIELD, SidebarTab::Team, self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED), cx))
-            .child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border))
-            .child({
-                let selected = self.browser.is_some() && self.right == RightPanel::Browser;
+        let mut bar = div().w(px(ACTIVITY_BAR)).flex_shrink_0().flex().flex_col().items_center().gap_1().pt(px(6.0)).pb(px(6.0)).bg(T.app).border_r_1().border_color(T.border);
+        for tab in SidebarTab::ALL {
+            // Les projets restent toujours accessibles : tout part de là.
+            if tab != SidebarTab::Projects && self.hidden_tools.contains(tab.key()) {
+                continue;
+            }
+            let badge = match tab {
+                SidebarTab::Workflows => running,
+                SidebarTab::Tasks => self.tasks.iter().any(|t| t.running()),
+                SidebarTab::Team => self.team.journal.first().is_some_and(|e| e.kind == kind::BLOCKED),
+                SidebarTab::Roblox => !self.roblox.servers.is_empty(),
+                _ => false,
+            };
+            bar = bar.child(self.activity_button(tab, badge, cx));
+        }
+        if !self.hidden_tools.contains(BROWSER_TOOL) {
+            let selected = self.browser.is_some() && self.right == RightPanel::Browser;
+            bar = bar.child(div().w(px(24.0)).h(px(1.0)).my_1().bg(T.border)).child(
                 div()
                     .id("activity-browser")
                     .relative()
@@ -1489,15 +1793,127 @@ impl Workspace {
                     .text_color(if selected { T.text } else { T.text3 })
                     .when(selected, |d| d.bg(T.hover))
                     .hover(|d| d.text_color(T.text))
+                    .tooltip(|window, cx| Tooltip::new("Navigateur").build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_browser(window, cx)))
-                    .child(icon(icons::GLOBE).size(px(18.0)))
-            })
+                    .child(icon(icons::GLOBE).size(px(18.0))),
+            );
+        }
+        bar.child(div().flex_1()).child(
+            div()
+                .id("activity-tools")
+                .size(px(36.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .text_color(if self.tools_menu { T.text } else { T.text3 })
+                .when(self.tools_menu, |d| d.bg(T.hover))
+                .hover(|d| d.text_color(T.text))
+                .tooltip(|window, cx| Tooltip::new("Choisir les outils affichés").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tools_menu = !this.tools_menu;
+                    cx.notify();
+                }))
+                .child(icon(icons::SLIDERS).size(px(17.0))),
+        )
     }
 
-    fn activity_button(&self, id: &'static str, svg: &'static str, tab: SidebarTab, badge: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// Menu « Outils affichés » : masquer ou réafficher chaque outil de la barre de gauche.
+    fn render_tools_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let row = |id: ElementId, svg: &'static str, label: &'static str, shown: bool, locked: bool| {
+            div()
+                .id(id)
+                .h(px(30.0))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2p5()
+                .rounded(px(5.0))
+                .when(!locked, |d| d.cursor_pointer().hover(|d| d.bg(T.hover)))
+                .child(icon(svg).size(px(14.0)).text_color(if shown { T.text2 } else { T.text3 }))
+                .child(div().flex_1().text_color(if shown { T.text } else { T.text3 }).child(label))
+                .child(if locked {
+                    div().text_size(px(11.0)).text_color(T.text3).child("toujours").into_any_element()
+                } else {
+                    icon(if shown { icons::EYE } else { icons::EYE_OFF }).size(px(14.0)).text_color(if shown { T.text2 } else { T.text3 }).into_any_element()
+                })
+        };
+        let mut menu = div()
+            .id("tools-menu")
+            .occlude()
+            .absolute()
+            .left(px(ACTIVITY_BAR + 6.0))
+            .bottom(px(34.0))
+            .w(px(240.0))
+            .p_1p5()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(T.border_strong)
+            .bg(T.raised)
+            .shadow_lg()
+            .child(div().px_2().py_1().child(section_label("Outils affichés")));
+        for tab in SidebarTab::ALL {
+            let key = tab.key();
+            let locked = tab == SidebarTab::Projects;
+            let shown = locked || !self.hidden_tools.contains(key);
+            menu = menu.child(row(ElementId::Name(format!("tool-{key}").into()), tab.icon(), tab.label(), shown, locked).when(!locked, |d| {
+                d.on_click(cx.listener(move |this, _, _, cx| this.toggle_tool(key, cx)))
+            }));
+        }
+        let browser_shown = !self.hidden_tools.contains(BROWSER_TOOL);
+        menu.child(row("tool-browser".into(), icons::GLOBE, "Navigateur", browser_shown, false).on_click(cx.listener(|this, _, _, cx| this.toggle_tool(BROWSER_TOOL, cx))))
+            .child(div().h(px(1.0)).my_1().bg(T.border))
+            .child(
+                div()
+                    .id("tool-hide-all")
+                    .h(px(30.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_toolbar(cx)))
+                    .child(icon(icons::PANEL_LEFT).size(px(14.0)).text_color(T.text2))
+                    .child(div().flex_1().child("Masquer toute la barre"))
+                    .child(div().text_size(px(11.0)).text_color(T.text3).child("bouton en haut à gauche")),
+            )
+    }
+
+    fn toggle_tool(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        if !self.hidden_tools.remove(key) {
+            self.hidden_tools.insert(key.to_owned());
+            // L'onglet ouvert vient d'être masqué : on revient aux projets.
+            if self.sidebar_tab.key() == key {
+                self.sidebar_tab = SidebarTab::Projects;
+            }
+            if key == BROWSER_TOOL && self.right == RightPanel::Browser {
+                self.right = RightPanel::Code;
+            }
+        }
+        save_hidden_tools(&self.hidden_tools);
+        cx.notify();
+    }
+
+    /// Masque ou réaffiche toute la colonne de gauche (barre d'activité et barre latérale).
+    fn toggle_toolbar(&mut self, cx: &mut Context<Self>) {
+        self.layout.toolbar = !self.layout.toolbar;
+        self.tools_menu = false;
+        save_layout(self.layout);
+        cx.notify();
+    }
+
+    fn activity_button(&self, tab: SidebarTab, badge: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let selected = self.sidebar_open && self.sidebar_tab == tab;
+        let label = tab.label();
         div()
-            .id(id)
+            .id(ElementId::Name(format!("activity-{}", tab.key()).into()))
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
             .relative()
             .size(px(36.0))
             .flex()
@@ -1518,12 +1934,15 @@ impl Workspace {
                 if tab == SidebarTab::Extensions {
                     this.refresh_extensions(cx);
                 }
+                if tab == SidebarTab::Roblox {
+                    this.refresh_roblox(cx);
+                }
                 this.adding = false;
                 this.picking_project = false;
                 cx.notify();
             }))
             .when(selected, |d| d.child(div().absolute().left(px(-6.0)).top(px(8.0)).w(px(2.0)).h(px(20.0)).rounded(px(1.0)).bg(T.accent)))
-            .child(icon(svg).size(px(18.0)))
+            .child(icon(tab.icon()).size(px(18.0)))
             .when(badge, |d| d.child(div().absolute().top(px(7.0)).right(px(7.0)).size(px(7.0)).rounded_full().bg(T.accent).opacity(if self.pulse { 1.0 } else { 0.4 })))
     }
 
@@ -1777,14 +2196,15 @@ impl Workspace {
     }
 
     fn render_center(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let center = div().flex_1().min_w_0().flex().flex_col().bg(T.surface);
+        let center = div().flex_1().min_w_0().flex().flex_col().bg(T.surface).children(self.render_project_bar(cx));
         let Some(active) = self.active_tab() else {
             return center.child(self.render_welcome(cx));
         };
         let (terminal, cwd, active_id, exited) = (active.terminal.clone(), active.project.path.display().to_string(), active.id, active.terminal.read(cx).exited);
 
+        // Agents du projet affiché ; en grille, ils sont déjà tous visibles.
         let mut tabs = div().flex().items_stretch().min_w_0().flex_1().overflow_hidden();
-        for tab in &self.tabs {
+        for tab in self.project_tabs().into_iter().filter(|_| !self.layout.grid) {
             let id = tab.id;
             let is_active_tab = Some(id) == self.active;
             tabs = tabs.child(
@@ -1803,7 +2223,7 @@ impl Workspace {
                     .when(is_active_tab, |d| d.bg(T.surface).border_t_2().border_color(T.claude))
                     .on_click(cx.listener(move |this, _, window, cx| this.activate(id, window, cx)))
                     .child(div().size(px(6.0)).flex_shrink_0().rounded_full().bg(T.claude).opacity(if is_active(tab) && !self.pulse { 0.35 } else { 1.0 }))
-                    .child(div().flex_1().min_w_0().truncate().text_color(if is_active_tab { T.text } else { T.text3 }).child(tab.title.clone()))
+                    .child(div().flex_1().min_w_0().truncate().text_color(if is_active_tab { T.text } else { T.text3 }).child(tab.display_title()))
                     .child(
                         div()
                             .id(("close", id))
@@ -1863,6 +2283,69 @@ impl Workspace {
                     )
                     .child(div().min_w_0().max_w(px(260.0)).truncate().text_size(px(12.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(cwd))
                     // Icônes avec infobulle : l'en-tête reste lisible quand la colonne est étroite.
+                    .child(
+                        div()
+                            .id("toggle-grid")
+                            .size(px(24.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(if self.layout.grid { T.claude } else { T.border })
+                            .text_color(if self.layout.grid { T.claude } else { T.text2 })
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover))
+                            .tooltip(|window, cx| Tooltip::new("Afficher toutes les conversations en grille").build(window, cx))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_grid(window, cx)))
+                            .child(icon(icons::GRID).size(px(12.0))),
+                    )
+                    .child({
+                        let open = self.right == RightPanel::Agents;
+                        let waiting = self.tabs.iter().filter(|t| agents::agent_state(t, cx) == agents::AgentState::Waiting).count();
+                        div()
+                            .id("toggle-agents")
+                            .h(px(24.0))
+                            .px_1p5()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(if open { T.accent } else { T.border })
+                            .text_size(px(11.0))
+                            .text_color(T.text2)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(T.hover).text_color(T.text))
+                            .tooltip(|window, cx| Tooltip::new("Agents : qui travaille, qui attend, qui a fini").build(window, cx))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_agents_panel(window, cx)))
+                            .child(icon(icons::AGENTS).size(px(12.0)))
+                            .child(self.tabs.len().to_string())
+                            .when(waiting > 0, |d| d.child(div().px_1().rounded(px(3.0)).bg(T.warn).text_color(T.app).font_weight(FontWeight::SEMIBOLD).child(waiting.to_string())))
+                    })
+                    .when(self.layout.grid, |d| {
+                        let shown = self.grid_code || self.right != RightPanel::Code;
+                        d.child(
+                            div()
+                                .id("toggle-grid-panel")
+                                .size(px(24.0))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(if shown { T.accent } else { T.border })
+                                .text_color(T.text2)
+                                .cursor_pointer()
+                                .hover(|d| d.bg(T.hover).text_color(T.text))
+                                .tooltip(|window, cx| Tooltip::new("Afficher ou masquer le panneau de droite").build(window, cx))
+                                .on_click(cx.listener(|this, _, window, cx| this.toggle_grid_panel(window, cx)))
+                                .child(icon(icons::PANEL_RIGHT).size(px(12.0))),
+                        )
+                    })
                     .child(
                         div()
                             .id("save-prompt")
@@ -1927,7 +2410,234 @@ impl Workspace {
             );
 
         let checkpoints = self.render_checkpoints(cx);
-        center.child(header).children(checkpoints).child(div().flex_1().min_h_0().pt(px(14.0)).px_4().child(terminal))
+        let center = center.child(header).children(checkpoints);
+        if self.layout.grid {
+            return center.child(self.render_grid(cx));
+        }
+        // Vue mise en cache : elle n'est recalculée que quand le terminal lui-même change.
+        center.child(div().flex_1().min_h_0().pt(px(14.0)).px_4().child(AnyView::from(terminal).cached(StyleRefinement::default().size_full())))
+    }
+
+    /// Onglets des projets qui ont des agents lancés (plus le projet affiché) : un clic
+    /// passe d'un projet à l'autre, les agents des autres projets continuent de tourner.
+    fn render_project_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let shown = self.current_project().map(|p| project_key(&p));
+        let mut projects: Vec<Project> = Vec::new();
+        for tab in &self.tabs {
+            if !projects.iter().any(|p| project_key(p) == project_key(&tab.project)) {
+                projects.push(tab.project.clone());
+            }
+        }
+        if projects.is_empty() {
+            return None;
+        }
+        if let Some(current) = self.current_project().filter(|p| !projects.iter().any(|q| project_key(q) == project_key(p))) {
+            projects.push(current);
+        }
+        let mut bar = div().h(px(34.0)).flex_shrink_0().flex().items_stretch().border_b_1().border_color(T.border).bg(T.app);
+        for (index, project) in projects.into_iter().enumerate() {
+            let key = project_key(&project);
+            let selected = shown.as_ref() == Some(&key);
+            let states: Vec<agents::AgentState> = self.tabs.iter().filter(|t| project_key(&t.project) == key).map(|t| agents::agent_state(t, cx)).collect();
+            // L'état le plus urgent du projet : une question en attente, puis le travail en cours.
+            let state = [agents::AgentState::Waiting, agents::AgentState::Working, agents::AgentState::Idle, agents::AgentState::Exited].into_iter().find(|s| states.contains(s));
+            bar = bar.child(
+                div()
+                    .id(("project-tab", index))
+                    .w(px(210.0))
+                    .flex_shrink(1.0)
+                    .min_w(px(110.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px(px(12.0))
+                    .border_r_1()
+                    .border_color(T.border)
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(T.panel).border_t_2().border_color(T.accent))
+                    .when(!selected, |d| d.hover(|d| d.bg(T.hover)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_project(key.clone(), window, cx)))
+                    .child(icon(icons::FOLDER).size(px(13.0)).text_color(if selected { T.text2 } else { T.text3 }))
+                    .child(div().flex_1().min_w_0().truncate().font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(if selected { T.text } else { T.text2 }).child(project.name.clone()))
+                    .when_some(state, |d, state| {
+                        d.child(div().size(px(7.0)).flex_shrink_0().rounded_full().bg(state.color()).opacity(if state == agents::AgentState::Working && !self.pulse { 0.35 } else { 1.0 }))
+                    })
+                    .child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(states.len().to_string())),
+            );
+        }
+        Some(
+            bar.child(
+                div()
+                    .id("new-agent")
+                    .w(px(34.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.hover))
+                    .tooltip(|window, cx| Tooltip::new("Nouvel agent sur ce projet").build(window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_conversation(None, window, cx)))
+                    .child(icon(icons::PLUS).size(px(14.0)).text_color(T.text3)),
+            )
+            .child(div().flex_1()),
+        )
+    }
+
+    /// Toutes les conversations côte à côte ; la place se répartit toute seule, et les
+    /// séparateurs entre les cases se glissent pour la redistribuer.
+    fn render_grid(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let visible: Vec<&Tab> = self.project_tabs().into_iter().filter(|t| !self.grid_zoomed || Some(t.id) == self.active).collect();
+        let shape = grid_rows(visible.len());
+        let (row_weights, col_weights) = self.grid_weights_for(&shape);
+        let mut remaining = visible.into_iter();
+        let mut grid = div()
+            .id("grid")
+            .flex_1()
+            .min_h_0()
+            .p(px(6.0))
+            .flex()
+            .flex_col()
+            .bg(T.app)
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<GridSplit>, _, cx| {
+                let split = *event.drag(cx);
+                this.drag_grid(split, event.event.position, event.bounds);
+                cx.notify();
+            }));
+        for (r, count) in shape.iter().enumerate() {
+            if r > 0 {
+                grid = grid.child(grid_splitter(("grid-row-split", r), GridSplit::Row(r - 1), true));
+            }
+            let mut row = div().flex_grow(row_weights[r]).flex_shrink_0().flex_basis(gpui_kit::relative(0.)).min_h_0().flex();
+            for (c, tab) in remaining.by_ref().take(*count).enumerate() {
+                if c > 0 {
+                    row = row.child(grid_splitter(("grid-col-split", r * 100 + c), GridSplit::Col(r, c - 1), false));
+                }
+                row = row.child(self.render_tile(tab, cx).flex_grow(col_weights[r][c]));
+            }
+            grid = grid.child(row);
+        }
+        grid
+    }
+
+    /// Proportions mémorisées si elles correspondent à la forme actuelle, sinon parts égales.
+    fn grid_weights_for(&self, shape: &[usize]) -> (Vec<f32>, Vec<Vec<f32>>) {
+        let total: usize = shape.iter().sum();
+        if let Some((count, rows, cols)) = &self.grid_weights {
+            if *count == total && rows.len() == shape.len() && cols.iter().map(Vec::len).eq(shape.iter().copied()) {
+                return (rows.clone(), cols.clone());
+            }
+        }
+        (vec![1.0; shape.len()], shape.iter().map(|n| vec![1.0; *n]).collect())
+    }
+
+    fn drag_grid(&mut self, split: GridSplit, position: Point<Pixels>, bounds: Bounds<Pixels>) {
+        let count = if self.grid_zoomed { 1 } else { self.project_tabs().len() };
+        let shape = grid_rows(count);
+        let (mut rows, mut cols) = self.grid_weights_for(&shape);
+        // Déplace la frontière entre deux voisins sans toucher aux autres.
+        let resize = |weights: &mut Vec<f32>, index: usize, fraction: f32| {
+            if index + 1 >= weights.len() {
+                return;
+            }
+            let total: f32 = weights.iter().sum();
+            let before: f32 = weights[..index].iter().sum();
+            let pair = weights[index] + weights[index + 1];
+            let min = pair * 0.12;
+            weights[index] = (fraction * total - before).clamp(min, pair - min);
+            weights[index + 1] = pair - weights[index];
+        };
+        match split {
+            GridSplit::Row(index) => {
+                let fraction = f32::from(position.y - bounds.origin.y) / f32::from(bounds.size.height).max(1.0);
+                resize(&mut rows, index, fraction);
+            }
+            GridSplit::Col(row, index) => {
+                let fraction = f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width).max(1.0);
+                if let Some(weights) = cols.get_mut(row) {
+                    resize(weights, index, fraction);
+                }
+            }
+        }
+        self.grid_weights = Some((count, rows, cols));
+    }
+
+    fn render_tile(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = tab.id;
+        let selected = Some(id) == self.active;
+        let state = agents::agent_state(tab, cx);
+        let button = |element: Stateful<Div>, svg: &'static str, size: f32| {
+            element.size(px(20.0)).flex_shrink_0().flex().items_center().justify_center().rounded(px(4.0)).text_color(T.text3).cursor_pointer().hover(|d| d.bg(T.hover).text_color(T.text)).child(icon(svg).size(px(size)))
+        };
+        let header = div()
+            .h(px(28.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl(px(10.0))
+            .pr_1()
+            .border_b_1()
+            .border_color(T.border)
+            .bg(T.panel)
+            .child(div().size(px(7.0)).flex_shrink_0().rounded_full().bg(state.color()).opacity(if state == agents::AgentState::Working && !self.pulse { 0.35 } else { 1.0 }))
+            .child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(format!("#{id}")))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(12.0)).text_color(if selected { T.text } else { T.text2 }).child(tab.display_title()))
+            .child(div().flex_shrink_0().max_w(px(120.0)).truncate().text_size(px(11.0)).text_color(T.text3).child(tab.project.name.clone()))
+            .child(div().flex_shrink_0().px_1p5().rounded(px(4.0)).text_size(px(11.0)).text_color(state.color()).bg(T.app).child(state.label()))
+            .when(!tab.inbox.is_empty(), |d| {
+                let count = tab.inbox.len();
+                d.child(
+                    div()
+                        .id(("tile-inbox", id))
+                        .flex_shrink_0()
+                        .px_1p5()
+                        .rounded(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(T.app)
+                        .bg(T.accent)
+                        .tooltip(|window, cx| Tooltip::new("Messages d'autres agents en attente : remis quand l'agent est au repos et que tu n'écris pas (valide ou Échap pour libérer ta saisie)").build(window, cx))
+                        .child(format!("{count} msg")),
+                )
+            })
+            .child(
+                button(div().id(("tile-zoom", id)), if self.grid_zoomed { icons::RESTORE } else { icons::MAXIMIZE }, 12.0)
+                    .tooltip(|window, cx| Tooltip::new("Agrandir ou revenir à la grille").build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.grid_zoomed = !this.grid_zoomed;
+                        this.focus_active(window, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(button(div().id(("tile-close", id)), icons::CLOSE, 12.0).on_click(cx.listener(move |this, _, window, cx| this.close_tab(id, window, cx))));
+
+        div()
+            .id(("tile", id))
+            .flex_shrink_0()
+            .flex_basis(gpui_kit::relative(0.))
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(if selected { T.claude } else { T.border })
+            .bg(T.surface)
+            // Un clic n'importe où dans la case (terminal compris) la rend active.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if this.active == Some(id) {
+                        this.focus_active(window, cx);
+                    } else {
+                        this.activate(id, window, cx);
+                    }
+                    window.prevent_default();
+                }),
+            )
+            .child(header)
+            .child(div().flex_1().min_h_0().pt(px(6.0)).px_2().child(AnyView::from(tab.terminal.clone()).cached(StyleRefinement::default().size_full())))
     }
 
     fn render_welcome(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2067,9 +2777,16 @@ impl Workspace {
     }
 
     fn render_right(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let panel = div().w(px(self.layout.right)).min_w(px(self.layout.right)).max_w(px(self.layout.right)).overflow_hidden().flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
+        // En grille, l'aperçu du code cède sa place aux conversations tant qu'on ne le demande pas.
+        if self.layout.grid && !self.grid_code && self.right == RightPanel::Code {
+            return None;
+        }
+        let panel =div().w(px(self.layout.right)).min_w(px(self.layout.right)).max_w(px(self.layout.right)).overflow_hidden().flex_shrink_0().flex().flex_col().bg(T.surface).min_h_0();
         if self.right == RightPanel::Journal {
             return Some(panel.child(self.render_journal(cx)));
+        }
+        if self.right == RightPanel::Agents {
+            return Some(panel.child(self.render_agents_panel(cx)));
         }
         if let RightPanel::Tasks(group) = self.right {
             if let Some(view) = self.render_task_panel(group, cx) {
@@ -2093,13 +2810,30 @@ impl Workspace {
         }
         if self.right == RightPanel::File {
             if let Some(opened) = &self.opened {
-                let lines = opened.lines.iter().enumerate().map(|(i, line)| {
-                    div()
-                        .flex()
-                        .h(px(20.0))
-                        .child(div().w(px(48.0)).flex_shrink_0().pr_3().flex().justify_end().text_color(T.text3).child((i + 1).to_string()))
-                        .child(div().whitespace_nowrap().child(code_text(line, opened.spans.get(i).unwrap_or(&Vec::new()))))
-                });
+                // Liste virtuelle : seules les lignes visibles sont construites.
+                let widest = opened.lines.iter().enumerate().max_by_key(|(_, l)| l.len()).map(|(i, _)| i);
+                let lines = uniform_list(
+                    "opened-lines",
+                    opened.lines.len(),
+                    cx.processor(|this, range: std::ops::Range<usize>, _, _| {
+                        let Some(opened) = &this.opened else { return Vec::new() };
+                        range
+                            .filter_map(|i| {
+                                let line = opened.lines.get(i)?;
+                                Some(
+                                    div()
+                                        .flex()
+                                        .h(px(20.0))
+                                        .child(div().w(px(48.0)).flex_shrink_0().pr_3().flex().justify_end().text_color(T.text3).child((i + 1).to_string()))
+                                        .child(div().whitespace_nowrap().child(code_text(line, opened.spans.get(i).unwrap_or(&Vec::new())))),
+                                )
+                            })
+                            .collect()
+                    }),
+                )
+                .with_width_from_item(widest)
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .size_full();
                 let toolbar = div()
                     .h(px(36.0))
                     .flex_shrink_0()
@@ -2115,7 +2849,7 @@ impl Workspace {
                     panel
                         .child(self.render_right_tabs(None, cx))
                         .child(toolbar)
-                        .child(div().id("opened-file").flex_1().min_h_0().overflow_scroll().py_2().font_family(theme::MONO_FONT).text_size(px(13.0)).line_height(px(20.0)).children(lines)),
+                        .child(div().flex_1().min_h_0().py_2().font_family(theme::MONO_FONT).text_size(px(13.0)).line_height(px(20.0)).child(lines)),
                 );
             }
         }
@@ -2221,10 +2955,34 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.accept_selected(cx)))
                     .child(icon(icons::CHECK).size(px(12.0)))
                     .child("Accepter"),
-            );
+            )
+            .when(changed.len() > 1, |d| {
+                d.child(
+                    div()
+                        .id("accept-all")
+                        .h(px(28.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(T.accent_bg)
+                        .text_color(T.accent)
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(T.hover))
+                        .tooltip(|window, cx| Tooltip::new("Accepter d'un coup toutes les modifications de cette conversation").build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.accept_all(cx)))
+                        .child(icon(icons::CHECK).size(px(12.0)))
+                        .child(format!("Tout accepter ({})", changed.len())),
+                )
+            });
 
         let mode = self.preview_mode;
-        let lines = self.render_diff_lines(&file, mode, cx);
+        let lines = self.render_diff_list(&file, mode, cx).size_full();
+        let comment_box = self.render_comment_box(&file, cx);
 
         let files_list = div()
             .flex_shrink_0()
@@ -2259,18 +3017,8 @@ impl Workspace {
             panel
                 .child(file_tabs)
                 .child(toolbar)
-                .child(
-                    div()
-                        .id("code")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_scroll()
-                        .py_2()
-                        .font_family(theme::MONO_FONT)
-                        .text_size(px(13.0))
-                        .line_height(px(20.0))
-                        .children(lines),
-                )
+                .child(div().flex_1().min_h_0().py_2().font_family(theme::MONO_FONT).text_size(px(13.0)).line_height(px(20.0)).child(lines))
+                .children(comment_box)
                 .child(files_list),
         )
     }
@@ -2299,6 +3047,7 @@ impl Workspace {
                             tab.selected_file = i;
                         }
                         this.right = RightPanel::Code;
+                        this.grid_code = true;
                         this.confirm_revert = false;
                         cx.notify();
                     }))
@@ -2322,6 +3071,7 @@ impl Workspace {
                     .when(is_selected, |d| d.bg(T.surface).border_t_2().border_color(T.accent))
                     .text_color(if is_selected { T.text } else { T.text3 })
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.grid_code = true;
                         this.right = RightPanel::Code;
                         cx.notify();
                     }))
@@ -2450,7 +3200,7 @@ impl Workspace {
         if let Some(project) = self.current_project() {
             crumbs = crumbs.child(icon(icons::FOLDER).size(px(12.0)).text_color(T.text3)).child(div().flex_shrink_0().text_color(T.text2).child(project.name));
             if let Some(tab) = self.active_tab() {
-                crumbs = crumbs.child(icon(icons::CHEVRON_RIGHT).size(px(11.0)).text_color(T.text3)).child(div().min_w_0().truncate().text_color(T.text).child(tab.title.clone()));
+                crumbs = crumbs.child(icon(icons::CHEVRON_RIGHT).size(px(11.0)).text_color(T.text3)).child(div().min_w_0().truncate().text_color(T.text).child(tab.display_title()));
             }
         }
         let search = div()
@@ -2486,6 +3236,9 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .text_color(T.text2)
+                // Sans `occlude`, la zone de glisser de la barre (le parent) passe avant le bouton
+                // au test de Windows : le clic déplaçait la fenêtre au lieu de la fermer.
+                .occlude()
                 .window_control_area(area)
                 .when(close, |d| d.hover(|d| d.bg(rgb(0xC42B1C)).text_color(rgb(0xFFFFFF))))
                 .when(!close, |d| d.hover(|d| d.bg(T.hover).text_color(T.text)))
@@ -2503,6 +3256,24 @@ impl Workspace {
             .border_color(T.border)
             .window_control_area(WindowControlArea::Drag)
             .child(div().w(px(ACTIVITY_BAR)).flex_shrink_0().flex().justify_center().child(icons::logo(20.0)))
+            .child(
+                div()
+                    .id("toggle-toolbar")
+                    .occlude()
+                    .size(px(24.0))
+                    .mr_1()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .text_color(if self.layout.toolbar { T.text3 } else { T.accent })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.hover).text_color(T.text))
+                    .tooltip(|window, cx| Tooltip::new("Masquer ou afficher la barre d'outils de gauche").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_toolbar(cx)))
+                    .child(icon(icons::PANEL_LEFT).size(px(14.0))),
+            )
             .child(div().flex_1().h_full().min_w_0().pl_1().flex().items_center().gap_2().child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child("SupaCode")).child(crumbs))
             .child(search)
             // Deux côtés de même largeur : la recherche reste au centre.
@@ -2622,6 +3393,20 @@ fn is_active(tab: &Tab) -> bool {
     tab.last_output.is_some_and(|t| t.elapsed() < ACTIVE_WINDOW)
 }
 
+impl Tab {
+    /// Titre affiché : le sujet en cours s'il est connu, sinon celui de la conversation.
+    fn display_title(&self) -> String {
+        self.live_title.clone().unwrap_or_else(|| self.title.clone())
+    }
+}
+
+/// Titre de terminal sans l'animation ni l'icône de Claude Code ; `None` s'il n'apprend rien.
+fn clean_title(raw: &str) -> Option<String> {
+    let text = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    let generic = text.is_empty() || text.eq_ignore_ascii_case("claude code") || text.eq_ignore_ascii_case("claude");
+    (!generic).then(|| text.to_owned())
+}
+
 fn project_key(project: &Project) -> String {
     project.path.display().to_string().to_lowercase()
 }
@@ -2655,16 +3440,80 @@ fn load_layout() -> Layout {
     Layout {
         sidebar: get("barre_laterale").unwrap_or(default.sidebar).clamp(MIN_SIDEBAR, MAX_SIDEBAR),
         right: get("panneau_droit").unwrap_or(default.right).max(MIN_RIGHT),
+        grid: value.as_ref().and_then(|v| v.get("grille")).and_then(|v| v.as_bool()).unwrap_or(default.grid),
+        toolbar: value.as_ref().and_then(|v| v.get("barre_outils")).and_then(|v| v.as_bool()).unwrap_or(default.toolbar),
     }
 }
 
-fn save_layout(layout: Layout) {
+/// Contenu actuel de `disposition.json` (objet vide s'il manque ou s'il est illisible).
+fn read_layout_file() -> serde_json::Map<String, serde_json::Value> {
+    layout_file()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_layout_file(value: serde_json::Map<String, serde_json::Value>) {
     let Some(file) = layout_file() else { return };
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let value = serde_json::json!({ "barre_laterale": layout.sidebar.round(), "panneau_droit": layout.right.round() });
-    let _ = std::fs::write(file, serde_json::to_string_pretty(&value).unwrap_or_default());
+    let _ = std::fs::write(file, serde_json::to_string_pretty(&serde_json::Value::Object(value)).unwrap_or_default());
+}
+
+fn load_hidden_tools() -> HashSet<String> {
+    read_layout_file().get("outils_masques").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect()
+}
+
+fn save_hidden_tools(hidden: &HashSet<String>) {
+    let mut value = read_layout_file();
+    let mut list: Vec<&String> = hidden.iter().collect();
+    list.sort();
+    value.insert("outils_masques".into(), serde_json::json!(list));
+    write_layout_file(value);
+}
+
+/// Nombre de cases par ligne de la grille : au plus carrée, les lignes les plus remplies d'abord.
+fn grid_rows(count: usize) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let columns = (1..=count).find(|c| c * c >= count).unwrap_or(count);
+    let rows = count.div_ceil(columns);
+    (0..rows).map(|row| count / rows + usize::from(row < count % rows)).collect()
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::grid_rows;
+
+    #[test]
+    fn repartit_les_cases_sans_en_perdre() {
+        assert!(grid_rows(0).is_empty());
+        assert_eq!(grid_rows(1), [1]);
+        assert_eq!(grid_rows(2), [2]);
+        assert_eq!(grid_rows(3), [2, 1]);
+        assert_eq!(grid_rows(4), [2, 2]);
+        assert_eq!(grid_rows(5), [3, 2]);
+        assert_eq!(grid_rows(6), [3, 3]);
+        assert_eq!(grid_rows(7), [3, 2, 2]);
+        assert_eq!(grid_rows(9), [3, 3, 3]);
+        assert_eq!(grid_rows(10), [4, 3, 3]);
+        for count in 1..40 {
+            assert_eq!(grid_rows(count).iter().sum::<usize>(), count);
+        }
+    }
+}
+
+fn save_layout(layout: Layout) {
+    // Les autres réglages du fichier (outils masqués) sont conservés.
+    let mut value = read_layout_file();
+    value.insert("barre_laterale".into(), serde_json::json!(layout.sidebar.round()));
+    value.insert("panneau_droit".into(), serde_json::json!(layout.right.round()));
+    value.insert("grille".into(), serde_json::json!(layout.grid));
+    value.insert("barre_outils".into(), serde_json::json!(layout.toolbar));
+    write_layout_file(value);
 }
 
 // — Projets ajoutés à la main (fichier de réglages de SupaCode)

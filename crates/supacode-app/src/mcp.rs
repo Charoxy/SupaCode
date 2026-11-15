@@ -1,5 +1,9 @@
 //! Serveur MCP local de SupaCode (transport HTTP « streamable », réponses JSON simples).
-//! Les agents lancés par SupaCode s'y connectent pour piloter le navigateur intégré.
+//! Les agents lancés par SupaCode s'y connectent pour piloter le navigateur intégré et pour
+//! se coordonner entre fenêtres d'agents.
+//!
+//! L'adresse peut porter `?agent=N` (fenêtre d'agent qui appelle) et `browser=0` (navigateur
+//! interdit par les règles d'équipe ou désactivé).
 //!
 //! Il n'écoute que sur 127.0.0.1, derrière un chemin secret tiré au hasard, et refuse
 //! toute requête venant d'une page web (en-tête `Origin`).
@@ -21,6 +25,8 @@ pub enum Content {
 
 /// Appel d'outil transmis à l'interface ; la réponse revient par `reply`.
 pub struct Call {
+    /// Fenêtre d'agent à l'origine de l'appel, si l'adresse l'indique.
+    pub agent: Option<usize>,
     pub tool: String,
     pub args: Value,
     pub reply: async_channel::Sender<Result<Vec<Content>>>,
@@ -79,9 +85,15 @@ fn serve(stream: TcpStream, path: &str, calls: &async_channel::Sender<Call>) -> 
         }
     }
     let mut stream = stream;
-    if target != path || origin {
+    let (target, query) = target.split_once('?').unwrap_or((target, ""));
+    // Hook de Claude Code : `<chemin>/hook/<événement>/<agent>` (voir `hook_command`).
+    let hook = target.strip_prefix(path).and_then(|rest| rest.strip_prefix("/hook/")).and_then(|rest| rest.split_once('/')).and_then(|(event, agent)| Some((event.to_owned(), agent.parse::<usize>().ok()?)));
+    if (target != path && hook.is_none()) || origin {
         return respond(&mut stream, "403 Forbidden", None);
     }
+    // Séparateur `,` accepté : `&` serait interprété par `cmd.exe` quand `claude` est un script.
+    let param = |key: &str| query.split(['&', ',']).find_map(|pair| pair.strip_prefix(key).and_then(|v| v.strip_prefix('=')));
+    let access = Access { agent: param("agent").and_then(|v| v.parse().ok()), browser: param("browser") != Some("0") };
     match method {
         "POST" => {}
         "DELETE" => return respond(&mut stream, "200 OK", None),
@@ -89,14 +101,57 @@ fn serve(stream: TcpStream, path: &str, calls: &async_channel::Sender<Call>) -> 
     }
     let mut body = vec![0; length.min(16 << 20)];
     reader.read_exact(&mut body)?;
+    // Hook de Claude Code (voir `hook_command`) : messages des autres agents en attente.
+    if let Some((event, agent)) = hook {
+        let text = match call(calls, Some(agent), INBOX_TOOL.into(), json!({ "event": event })) {
+            value if value.get("isError").is_some() => String::new(),
+            value => value["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        };
+        return respond_text(&mut stream, &hook_output(&event, &text));
+    }
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return respond(&mut stream, "400 Bad Request", None);
     };
-    match handle(&message, calls) {
+    match handle(&message, calls, &access) {
         Some(answer) => respond(&mut stream, "200 OK", Some(&answer)),
         // Notification : rien à répondre.
         None => respond(&mut stream, "202 Accepted", None),
     }
+}
+
+/// Longueur maximale d'un message entre agents : ils échangent des faits, pas des discussions.
+pub const MAX_MESSAGE: usize = 300;
+
+/// Outil interne (pas proposé aux agents) qui vide la boîte de réception d'un agent.
+pub const INBOX_TOOL: &str = "agent_inbox";
+
+/// Hooks `PostToolUse` et `Stop` (type `http`) donnés à chaque agent : après chaque action,
+/// et avant de s'arrêter, Claude Code demande à SupaCode les messages en attente ; Claude les
+/// lit tout de suite, en pleine tâche, sans que rien soit tapé dans son terminal.
+pub fn agent_hooks(url: &str, agent: usize) -> Value {
+    let hook = |event: &str| json!([{ "hooks": [{ "type": "http", "url": format!("{url}/hook/{event}/{agent}"), "timeout": 10 }] }]);
+    json!({ "hooks": { "PostToolUse": hook("post"), "Stop": hook("stop") } })
+}
+
+/// Réponse attendue par Claude Code pour un hook ; vide s'il n'y a rien à transmettre.
+fn hook_output(event: &str, text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let text = format!("Message d'un autre agent SupaCode, à prendre en compte maintenant :\n{text}");
+    let value = if event == "stop" {
+        // Empêche l'agent de s'arrêter : il traite d'abord le message.
+        json!({ "decision": "block", "reason": text })
+    } else {
+        json!({ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": text } })
+    };
+    value.to_string()
+}
+
+fn respond_text(stream: &mut TcpStream, body: &str) -> Result<()> {
+    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
+    stream.flush()?;
+    Ok(())
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: Option<&Value>) -> Result<()> {
@@ -107,7 +162,13 @@ fn respond(stream: &mut TcpStream, status: &str, body: Option<&Value>) -> Result
     Ok(())
 }
 
-fn handle(message: &Value, calls: &async_channel::Sender<Call>) -> Option<Value> {
+/// Ce que l'adresse appelée autorise.
+struct Access {
+    agent: Option<usize>,
+    browser: bool,
+}
+
+fn handle(message: &Value, calls: &async_channel::Sender<Call>, access: &Access) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -116,16 +177,18 @@ fn handle(message: &Value, calls: &async_channel::Sender<Call>) -> Option<Value>
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "supacode", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Navigateur intégré à SupaCode, affiché à l'utilisateur dans le panneau de droite. \
-                Sers-t'en pour vérifier une fonctionnalité, reproduire un bug ou montrer un résultat. \
-                Commence par browser_open, puis browser_snapshot pour voir les éléments (numérotés par « ref »).",
+            "instructions": instructions(access),
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/list" => Ok(json!({ "tools": tools(access) })),
         "tools/call" => {
             let tool = params.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            Ok(call(calls, tool, args))
+            if tool.starts_with("browser_") && !access.browser {
+                Ok(json!({ "content": [{ "type": "text", "text": "Erreur : le navigateur n'est pas autorisé pour cette session." }], "isError": true }))
+            } else {
+                Ok(call(calls, access.agent, tool, args))
+            }
         }
         _ => Err(json!({ "code": -32601, "message": format!("méthode inconnue : {method}") })),
     };
@@ -135,10 +198,10 @@ fn handle(message: &Value, calls: &async_channel::Sender<Call>) -> Option<Value>
     })
 }
 
-fn call(calls: &async_channel::Sender<Call>, tool: String, args: Value) -> Value {
+fn call(calls: &async_channel::Sender<Call>, agent: Option<usize>, tool: String, args: Value) -> Value {
     let (reply, answer) = async_channel::bounded(1);
     let outcome = calls
-        .send_blocking(Call { tool, args, reply })
+        .send_blocking(Call { agent, tool, args, reply })
         .map_err(|_| anyhow::anyhow!("SupaCode est en train de se fermer"))
         .and_then(|_| answer.recv_blocking().map_err(|_| anyhow::anyhow!("l'appel a été abandonné")))
         .and_then(|r| r);
@@ -153,7 +216,56 @@ fn call(calls: &async_channel::Sender<Call>, tool: String, args: Value) -> Value
     }
 }
 
-fn tools() -> Value {
+fn instructions(access: &Access) -> String {
+    let mut text = String::new();
+    if access.browser {
+        text.push_str(
+            "Navigateur intégré à SupaCode, affiché à l'utilisateur dans le panneau de droite. \
+             Sers-t'en pour vérifier une fonctionnalité, reproduire un bug ou montrer un résultat. \
+             Commence par browser_open, puis browser_snapshot pour voir les éléments (numérotés par « ref »). ",
+        );
+    }
+    if access.agent.is_some() {
+        text.push_str(
+            "Plusieurs agents peuvent tourner dans SupaCode, chacun dans sa fenêtre. agents_list les montre \
+             avec leur état, agent_read affiche l'écran d'un agent et agent_send lui écrit.",
+        );
+    }
+    text
+}
+
+fn tools(access: &Access) -> Value {
+    let mut all = Vec::new();
+    if access.browser {
+        all.extend(browser_tools().as_array().cloned().unwrap_or_default());
+    }
+    if access.agent.is_some() {
+        all.extend(agent_tools().as_array().cloned().unwrap_or_default());
+    }
+    Value::Array(all)
+}
+
+fn agent_tools() -> Value {
+    json!([
+        {
+            "name": "agents_list",
+            "description": "Liste les fenêtres d'agents ouvertes dans SupaCode : numéro, sujet en cours, projet et état (au travail, attend une réponse, au repos, terminée). Ta propre fenêtre est marquée « toi ».",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "agent_read",
+            "description": "Texte affiché en ce moment dans la fenêtre d'un autre agent, pour voir où il en est.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "integer", "description": "Numéro de la fenêtre (agents_list)." } }, "required": ["id"] },
+        },
+        {
+            "name": "agent_send",
+            "description": "Envoie un message court à un autre agent (300 caractères au plus), seulement s'il change son travail : fichier ou fonction que tu modifies, conflit, résultat dont il a besoin. Pas de politesse, de remerciement ni d'accusé de réception. Il le lit en direct dès sa prochaine action.",
+            "inputSchema": { "type": "object", "properties": { "to": { "type": "integer", "description": "Numéro de la fenêtre destinataire (agents_list)." }, "message": { "type": "string", "maxLength": 300, "description": "Une ou deux phrases factuelles." } }, "required": ["to", "message"] },
+        },
+    ])
+}
+
+fn browser_tools() -> Value {
     let target = json!({
         "ref": { "type": "integer", "description": "Numéro « ref » donné par browser_snapshot." },
         "selector": { "type": "string", "description": "Sélecteur CSS, à défaut de ref." },
@@ -220,4 +332,47 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "action": { "type": "string", "enum": ["back", "forward", "reload"] } }, "required": ["action"] },
         },
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// POST brut, renvoie le corps de la réponse.
+    fn post(url: &str, body: &str) -> String {
+        let rest = url.strip_prefix("http://").unwrap();
+        let (host, path) = rest.split_once('/').unwrap();
+        let mut stream = TcpStream::connect(host).unwrap();
+        write!(stream, "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        answer.split_once("\r\n\r\n").unwrap().1.to_owned()
+    }
+
+    #[test]
+    fn le_hook_transmet_les_messages_en_attente() {
+        let server = start().unwrap();
+        let calls = server.calls.clone();
+        std::thread::spawn(move || {
+            while let Ok(call) = calls.recv_blocking() {
+                assert_eq!(call.tool, INBOX_TOOL);
+                let text = if call.agent == Some(3) { "[Message de l'agent #1] j'ai déjà créé utils.rs" } else { "" };
+                let _ = call.reply.send_blocking(Ok(vec![Content::Text(text.into())]));
+            }
+        });
+        let hooks = agent_hooks(&server.url, 3);
+        let post_url = hooks["hooks"]["PostToolUse"][0]["hooks"][0]["url"].as_str().unwrap().to_owned();
+        let answer: Value = serde_json::from_str(&post(&post_url, r#"{"hook_event_name":"PostToolUse"}"#)).unwrap();
+        assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert!(answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("utils.rs"));
+
+        let stop_url = hooks["hooks"]["Stop"][0]["hooks"][0]["url"].as_str().unwrap().to_owned();
+        let answer: Value = serde_json::from_str(&post(&stop_url, "{}")).unwrap();
+        assert_eq!(answer["decision"], "block");
+
+        // Rien en attente : réponse vide (Claude Code continue normalement).
+        assert_eq!(post(&post_url.replace("/post/3", "/post/4"), "{}"), "");
+        // Chemin secret faux : refusé.
+        assert_eq!(post(&post_url.replace("/hook/", "/x/hook/"), "{}"), "");
+    }
 }

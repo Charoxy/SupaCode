@@ -1,13 +1,14 @@
 //! Onglet Prompts : la bibliothèque de prompts du projet (`.supacode/prompts/`), versionnée
 //! par git. Lancement dans une conversation, historique, comparaison entre versions,
-//! et « Enregistrer ce prompt » depuis une conversation.
+//! et « Enregistrer ce prompt » depuis une conversation. En dessous, la bibliothèque de prompts
+//! d'Anthropic : des prompts prêts à lancer, ou à copier dans le projet pour les adapter.
 
 use std::collections::HashMap;
 
 use similar::{ChangeTag, TextDiff};
 use supacode_core::audit::{self, kind};
 use supacode_core::engine;
-use supacode_core::prompts::{self, PromptFile, Version};
+use supacode_core::prompts::{self, Preset, PromptFile, Version};
 
 use crate::ask::{AskDialog, AskEvent};
 
@@ -40,6 +41,11 @@ impl Workspace {
     pub(super) fn open_prompt(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(project) = self.workflows_project() else { return };
         self.right = RightPanel::Prompt;
+        if prompts::preset(&id).is_some() {
+            self.prompt_view = Some(PromptView { id, version: "Anthropic".into(), history: Vec::new(), compare: None });
+            cx.notify();
+            return;
+        }
         self.prompt_view = Some(PromptView { id: id.clone(), version: String::new(), history: Vec::new(), compare: None });
         cx.notify();
         let root = project.path;
@@ -88,7 +94,7 @@ impl Workspace {
     fn edit_prompt(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(project) = self.workflows_project() else { return };
         let path = prompts::dir(&project.path).join(format!("{id}.md"));
-        if std::process::Command::new("cmd").args(["/c", "start", ""]).arg(&path).spawn().is_err() {
+        if crate::desktop::open_path(&path).is_err() {
             self.open_file(&project.path, prompts::relative_path(id), cx);
         }
     }
@@ -96,7 +102,8 @@ impl Workspace {
     /// Lance un prompt de la bibliothèque, après avoir demandé ses variables s'il en a.
     fn launch_prompt(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.workflows_project() else { return };
-        let file = match prompts::load(&project.path, id) {
+        let preset = prompts::preset(id);
+        let file = match preset.map(Preset::to_file).map(Ok).unwrap_or_else(|| prompts::load(&project.path, id)) {
             Ok(file) => file,
             Err(e) => {
                 self.toast(format!("{e:#}"), cx);
@@ -113,18 +120,27 @@ impl Workspace {
             .variables
             .iter()
             .map(|name| {
-                let value = if matches!(name.as_str(), "file" | "fichier") { opened.clone() } else { String::new() };
-                (name.clone(), name.replace(['_', '-'], " "), value)
+                let value = if matches!(name.as_str(), "file" | "fichier" | "path") { opened.clone() } else { String::new() };
+                let label = name.replace(['_', '-'], " ");
+                // Bibliothèque d'Anthropic : l'exemple d'origine montre ce qui est attendu.
+                let label = match preset.and_then(|p| p.examples.get(name)) {
+                    Some(example) => format!("{label} (ex. : {example})"),
+                    None => label,
+                };
+                (name.clone(), label, value)
             })
             .collect();
-        let subtitle = file.description.clone();
+        let subtitle = match preset.and_then(|p| p.note.clone()) {
+            Some(note) => Some(note),
+            None => file.description.clone(),
+        };
         let title = format!("Lancer « {} »", file.title);
         self.ask_user(title, subtitle, "Lancer", fields, Pending::Prompt { root: project.path, file }, window, cx);
     }
 
     fn run_prompt(&mut self, root: PathBuf, file: PromptFile, values: HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         let text = engine::render(&file.body, &values);
-        let version = prompts::version(&root, &file.id);
+        let version = if prompts::preset(&file.id).is_some() { "bibliothèque Anthropic".to_owned() } else { prompts::version(&root, &file.id) };
         audit::record(&root, kind::PROMPT, format!("Prompt « {} » lancé (version {version})", file.title), serde_json::json!({ "prompt": file.id, "version": version, "variables": values }), None);
         let Some(project) = self.projects.iter().find(|p| same_path(&p.path, &root)).cloned() else { return };
         match self.active_tab().filter(|t| same_path(&t.project.path, &root) && !t.terminal.read(cx).exited) {
@@ -221,6 +237,25 @@ impl Workspace {
                 self.toast(format!("Prompt enregistré : {} (à versionner avec git)", prompts::relative_path(&id)), cx);
             }
             Err(e) => self.toast(format!("Impossible d'enregistrer le prompt : {e:#}"), cx),
+        }
+    }
+
+    /// Copie un prompt de la bibliothèque d'Anthropic dans `.supacode/prompts/`, pour l'adapter
+    /// et le versionner avec le projet (jamais en remplaçant un fichier).
+    fn add_preset(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.workflows_project() else {
+            self.toast("Ajoute d'abord un projet.", cx);
+            return;
+        };
+        let Some(preset) = prompts::preset(id) else { return };
+        match prompts::save(&project.path, &preset.title, Some(&preset.description), &preset.body) {
+            Ok(new_id) => {
+                audit::record(&project.path, kind::PROMPT, format!("Prompt « {} » ajouté depuis la bibliothèque d'Anthropic", preset.title), serde_json::json!({ "prompt": new_id, "preset": preset.id }), None);
+                self.load_prompts();
+                self.open_prompt(new_id.clone(), cx);
+                self.toast(format!("Prompt ajouté au projet : {} (à adapter, puis à versionner avec git)", prompts::relative_path(&new_id)), cx);
+            }
+            Err(e) => self.toast(format!("Impossible d'ajouter le prompt : {e:#}"), cx),
         }
     }
 
@@ -357,13 +392,104 @@ impl Workspace {
                 }
             }
         }
-        list
+        list.child(self.render_presets(cx))
+    }
+
+    /// Bibliothèque d'Anthropic, par catégorie : clic pour lire, ▶ pour lancer, + pour copier
+    /// dans le projet.
+    fn render_presets(&self, cx: &mut Context<Self>) -> Div {
+        let all = prompts::presets();
+        let open = self.presets_open;
+        let header = div()
+            .id("presets-toggle")
+            .mt_3()
+            .px_1p5()
+            .h(px(26.0))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|d| d.bg(T.hover))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.presets_open = !this.presets_open;
+                cx.notify();
+            }))
+            .child(icon(if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }).size(px(13.0)).text_color(T.text3))
+            .child(section_label("Bibliothèque d'Anthropic").flex_1())
+            .child(div().text_size(px(11.0)).text_color(T.text3).child(all.len().to_string()));
+        let mut section = div().flex().flex_col().gap(px(2.0)).child(header);
+        if !open {
+            return section;
+        }
+        let selected = self.prompt_view.as_ref().filter(|_| self.right == RightPanel::Prompt).map(|v| v.id.clone());
+        let mut category = "";
+        for (i, preset) in all.iter().enumerate() {
+            if preset.category != category {
+                category = &preset.category;
+                section = section.child(div().px_1p5().pt_2().pb_0p5().text_size(px(11.0)).text_color(T.text3).child(category.to_owned()));
+            }
+            let id = format!("{}{}", prompts::PRESET_PREFIX, preset.id);
+            let (show, launch, add) = (id.clone(), id.clone(), id.clone());
+            let action = |el: Stateful<Div>, svg: &'static str, tip: &'static str| {
+                el.size(px(24.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_color(T.border)
+                    .rounded(px(6.0))
+                    .bg(T.panel)
+                    .text_color(T.text2)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(T.raised).text_color(T.text))
+                    .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+                    .child(icon(svg).size(px(10.0)))
+            };
+            section = section.child(
+                div()
+                    .id(("preset", i))
+                    .px_1p5()
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(selected.as_deref() == Some(id.as_str()), |d| d.bg(T.hover))
+                    .hover(|d| d.bg(T.hover))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_prompt(show.clone(), cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().truncate().child(preset.title.clone()))
+                            .child(div().truncate().text_size(px(11.0)).text_color(T.text3).child(preset.description.clone())),
+                    )
+                    .child(action(div().id(("preset-add", i)), icons::PLUS, "Copier dans le projet pour l'adapter").on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.add_preset(&add, cx);
+                    })))
+                    .child(action(div().id(("preset-launch", i)), icons::PLAY, "Lancer dans la conversation").on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.launch_prompt(&launch, window, cx);
+                    }))),
+            );
+        }
+        section
     }
 
     pub(super) fn render_prompt_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
         let view = self.prompt_view.as_ref()?;
-        let project = self.workflows_project()?;
-        let file = prompts::load(&project.path, &view.id).ok()?;
+        let preset = prompts::preset(&view.id);
+        let file = match preset {
+            Some(preset) => preset.to_file(),
+            None => prompts::load(&self.workflows_project()?.path, &view.id).ok()?,
+        };
         let button = |id: &'static str, svg: &'static str, label: &'static str, primary: bool| {
             div()
                 .id(id)
@@ -422,9 +548,15 @@ impl Workspace {
                     .flex()
                     .gap_2()
                     .child(button("prompt-run", icons::PLAY, "Lancer", true).on_click(cx.listener(move |this, _, window, cx| this.launch_prompt(&launch, window, cx))))
-                    .child(button("prompt-edit", icons::EDIT, "Modifier", false).on_click(cx.listener(move |this, _, _, cx| this.edit_prompt(&edit, cx))))
+                    .map(|d| match preset {
+                        Some(_) => d.child(button("prompt-add", icons::PLUS, "Copier dans le projet", false).on_click(cx.listener(move |this, _, _, cx| this.add_preset(&edit, cx)))),
+                        None => d.child(button("prompt-edit", icons::EDIT, "Modifier", false).on_click(cx.listener(move |this, _, _, cx| this.edit_prompt(&edit, cx)))),
+                    })
                     .child(div().flex_1())
-                    .child(div().text_size(px(11.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(prompts::relative_path(&view.id))),
+                    .child(div().text_size(px(11.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(match preset {
+                        Some(preset) => format!("Anthropic · {}", preset.source),
+                        None => prompts::relative_path(&view.id),
+                    })),
             );
 
         let body = match &view.compare {
@@ -477,6 +609,27 @@ impl Workspace {
             .child(div().id("prompt-history").max_h(px(220.0)).overflow_y_scroll().pb_2().children(history))
             .when(!view.history.is_empty(), |d| d.child(div().px_4().pb_3().text_size(px(11.0)).text_color(T.text3).child("Clique une version pour la comparer à l'actuelle.")));
 
+        // Bibliothèque : ce qu'il faut fournir, les exemples et la suite, à la place de l'historique.
+        let footer = match preset {
+            Some(preset) => {
+                let note = |label: &'static str, text: String| div().flex().flex_col().gap_0p5().child(section_label(label)).child(div().text_size(px(12.0)).text_color(T.text2).child(text));
+                let examples = file.variables.iter().filter_map(|v| preset.examples.get(v).map(|e| format!("{{{{{v}}}}} : {e}"))).collect::<Vec<_>>();
+                div()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(T.border)
+                    .px_4()
+                    .py_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .when_some(preset.note.clone(), |d, text| d.child(note("Avant de lancer", text)))
+                    .when(!examples.is_empty(), |d| d.child(note("Exemples", examples.join("\n"))))
+                    .when_some(preset.next.clone(), |d, text| d.child(note("Pour aller plus loin", text)))
+                    .into_any_element()
+            }
+            None => history.into_any_element(),
+        };
         Some(
             div()
                 .size_full()
@@ -484,7 +637,7 @@ impl Workspace {
                 .flex_col()
                 .child(header)
                 .child(div().id("prompt-body").flex_1().min_h_0().overflow_y_scroll().font_family(theme::MONO_FONT).text_size(px(12.5)).line_height(px(20.0)).child(body))
-                .child(history),
+                .child(footer),
         )
     }
 }

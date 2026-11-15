@@ -135,6 +135,55 @@ pub fn template() -> &'static str {
     "Décris ici ce que l'agent doit faire, comme tu l'expliquerais à un collègue.\n\nLes variables s'écrivent {{comme_ceci}} : SupaCode les demande au lancement.\n"
 }
 
+// — Bibliothèque d'Anthropic
+
+/// Préfixe des identifiants des prompts de la bibliothèque d'Anthropic (jamais un fichier).
+pub const PRESET_PREFIX: &str = "anthropic:";
+
+/// Prompt prêt à l'emploi de la bibliothèque d'Anthropic
+/// (https://code.claude.com/docs/fr/prompt-library), embarqué dans SupaCode.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Preset {
+    pub id: String,
+    /// Catégorie (Comprendre, Planifier, Déboguer…), dans l'ordre de la bibliothèque.
+    pub category: String,
+    pub title: String,
+    /// Pourquoi ce prompt fonctionne.
+    pub description: String,
+    /// Texte du prompt, avec des `{{variables}}`.
+    pub body: String,
+    /// Valeur d'exemple de chaque variable.
+    #[serde(default)]
+    pub examples: HashMap<String, String>,
+    /// Ce qu'il faut fournir avant de lancer (capture, fichier, outil connecté…).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Pour aller plus loin.
+    #[serde(default)]
+    pub next: Option<String>,
+    /// Guide d'Anthropic d'où vient le prompt.
+    pub source: String,
+}
+
+impl Preset {
+    /// Le prompt sous la forme d'un prompt de projet (lancement, variables).
+    pub fn to_file(&self) -> PromptFile {
+        PromptFile { id: format!("{PRESET_PREFIX}{}", self.id), title: self.title.clone(), description: Some(self.description.clone()), agent: None, variables: variables_in(&self.body), body: self.body.clone() }
+    }
+}
+
+/// Les prompts de la bibliothèque d'Anthropic, dans leur ordre d'origine.
+pub fn presets() -> &'static [Preset] {
+    static PRESETS: std::sync::OnceLock<Vec<Preset>> = std::sync::OnceLock::new();
+    PRESETS.get_or_init(|| serde_json::from_str(include_str!("../assets/prompts-anthropic.json")).expect("bibliothèque de prompts embarquée invalide"))
+}
+
+/// Prompt de la bibliothèque à partir de son identifiant (`anthropic:<id>`).
+pub fn preset(id: &str) -> Option<&'static Preset> {
+    let id = id.strip_prefix(PRESET_PREFIX)?;
+    presets().iter().find(|p| p.id == id)
+}
+
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     let mut out = String::new();
     let spawn = Spawn::program("git", args.iter().map(|a| (*a).to_owned()).collect(), root);
@@ -203,7 +252,27 @@ pub fn last_user_message(transcript: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, variables_in};
+    use super::{parse, preset, presets, variables_in};
+
+    #[test]
+    fn bibliotheque_anthropic() {
+        let all = presets();
+        assert!(all.len() >= 50);
+        for p in all {
+            assert!(!p.title.is_empty() && !p.body.is_empty() && !p.category.is_empty(), "{}", p.id);
+            // Chaque variable a un exemple, et chaque exemple sert.
+            let vars = variables_in(&p.body);
+            for v in &vars {
+                assert!(p.examples.contains_key(v), "{} : pas d'exemple pour {v}", p.id);
+            }
+            assert_eq!(vars.len(), p.examples.len(), "{}", p.id);
+            assert!(!p.body.contains('{') || p.body.contains("{{"), "{} : accolades simples", p.id);
+        }
+        let file = preset("anthropic:explain-unfamiliar-code").unwrap().to_file();
+        assert_eq!(file.id, "anthropic:explain-unfamiliar-code");
+        assert_eq!(file.variables, ["path", "format"]);
+        assert!(preset("explain-unfamiliar-code").is_none());
+    }
 
     #[test]
     fn lit_l_en_tete() {

@@ -13,6 +13,7 @@ pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod prompts;
+pub mod roblox;
 pub mod router;
 pub mod templates;
 pub mod time;

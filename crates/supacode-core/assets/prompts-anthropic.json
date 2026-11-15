@@ -1,0 +1,627 @@
+[
+  {
+    "id": "get-oriented-in-a",
+    "category": "Prise en main",
+    "title": "Vous repérer dans un nouveau dépôt",
+    "description": "Décrivez ce que vous voulez savoir, pas les fichiers à lire. Claude explore le projet par lui-même et vous renvoie un résumé de la façon dont l'ensemble s'articule.",
+    "body": "donnez-moi un aperçu de cette base de code : architecture, répertoires clés et façon dont les éléments sont reliés",
+    "examples": {},
+    "next": "Exécutez `/init` pour configurer `CLAUDE.md` afin que Claude s'en souvienne à chaque session",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "explain-unfamiliar-code",
+    "category": "Comprendre",
+    "title": "Expliquer du code inconnu",
+    "description": "Nommez le fichier et précisez le format de réponse souhaité. Remplacez la page HTML par un diagramme, des listes à puces ou tout ce qui correspond à votre façon d'apprendre.",
+    "body": "expliquez ce que fait {{path}} et comment les données y circulent. présentez le tout sous la forme d'{{format}}",
+    "examples": {
+      "path": "src/scheduler/queue.ts",
+      "format": "une page HTML avec un diagramme, puis ouvrez-la dans mon navigateur"
+    },
+    "next": "Définissez un style de sortie pour que Claude explique toujours dans votre format préféré",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "find-where-something-happens",
+    "category": "Comprendre",
+    "title": "Trouver où quelque chose se produit",
+    "description": "Recherchez par comportement plutôt que par nom de fichier. La recherche fonctionne même si vous ignorez le nom du fichier ou le répertoire dans lequel il se trouve.",
+    "body": "où est-ce que nous {{behavior}} ?",
+    "examples": {
+      "behavior": "validons les types de fichiers téléversés"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "see-what-depends-on",
+    "category": "Comprendre",
+    "title": "Vérifier ce qui casse avant de supprimer",
+    "description": "Posez la question avant de supprimer quoi que ce soit. La liste des appelants et des effets en aval vous indique s'il s'agit d'un nettoyage d'une ligne ou d'une modification à coordonner.",
+    "body": "qu'est-ce qui casserait si je supprimais {{target}} ?",
+    "examples": {
+      "target": "le helper retryWithBackoff"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "trace-how-code-evolved",
+    "category": "Comprendre",
+    "title": "Retracer l'évolution du code",
+    "description": "Orientez Claude vers l'historique des commits lorsque la question porte sur le pourquoi, et non sur le quoi. Claude lit le log et le blame de votre système de gestion de versions, quel qu'il soit, et explique les décisions à l'origine de l'implémentation actuelle.",
+    "body": "parcourez l'historique des commits de {{path}} et résumez comment il a évolué et pourquoi",
+    "examples": {
+      "path": "internal/auth/session.go"
+    },
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "scope-a-change-before",
+    "category": "Comprendre",
+    "title": "Évaluer l'ampleur d'une modification avant de commencer",
+    "description": "Estimez le travail avant de l'inscrire à une feuille de route. La liste des fichiers vous indique s'il s'agit d'un seul composant ou d'une modification transversale.",
+    "body": "quels fichiers devrais-je modifier pour {{change}} ?",
+    "examples": {
+      "change": "ajouter un bouton de mode sombre dans les paramètres"
+    },
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "ask-the-codebase-a",
+    "category": "Comprendre",
+    "title": "Poser une question produit à la base de code",
+    "description": "Indiquez votre rôle pour que la réponse soit adaptée au bon niveau. Claude explique ce que fait réellement le produit à partir du code source, sans que vous ayez besoin de le lire.",
+    "body": "je suis {{role}}. expliquez-moi ce qui se passe lorsqu'un utilisateur {{action}}, de l'interface jusqu'au résultat",
+    "examples": {
+      "role": "PM",
+      "action": "clique sur Exporter en PDF"
+    },
+    "next": "Définissez un style de sortie pour que Claude adapte toujours ses réponses à ce niveau",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "plan-a-multi-file",
+    "category": "Planifier",
+    "title": "Planifier une modification multi-fichiers avant de toucher au code",
+    "description": "Ajouter « ne modifiez rien pour l'instant » sépare l'exploration des modifications, afin que vous voyiez l'approche avant que le moindre code ne change. Pour faire de la planification préalable le comportement par défaut pour chaque prompt, appuyez sur Shift+Tab pour passer en mode plan.",
+    "body": "planifiez comment refactoriser le {{target}} pour {{goal}}. listez les fichiers que vous modifieriez, mais ne modifiez rien pour l'instant",
+    "examples": {
+      "target": "module de paiement",
+      "goal": "prendre en charge plusieurs devises"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "draft-a-spec-by",
+    "category": "Planifier",
+    "title": "Rédiger une spécification par entretien",
+    "description": "Demandez à être interviewé au lieu de rédiger vous-même la spécification. Claude vous pose des questions structurées jusqu'à ce que les exigences soient complètes, puis écrit le résultat dans un fichier.",
+    "body": "je veux développer {{feature}}. interrogez-moi sur l'implémentation, l'UX, les cas limites et les compromis jusqu'à ce que nous ayons tout couvert, puis écrivez la spécification dans SPEC.md",
+    "examples": {
+      "feature": "des limites de débit par espace de travail"
+    },
+    "next": "Enregistrez vos questions d'entretien sous forme de skill `/spec` pour que chaque spécification commence de la même façon",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "turn-a-meeting-into",
+    "category": "Planifier",
+    "title": "Transformer une réunion en tickets",
+    "description": "Sautez l'étape de retranscription. Claude extrait les actions à mener d'un contenu non structuré et les inscrit directement dans votre outil de suivi via MCP : vous relisez les tickets, pas la transcription.",
+    "body": "lisez {{input}} et rédigez les actions à mener, puis créez un ticket dans {{tracker}} pour chacune d'elles, avec des critères d'acceptation",
+    "examples": {
+      "input": "@meeting-notes.md",
+      "tracker": "notre outil de suivi des tickets"
+    },
+    "note": "Nécessite un outil de suivi (tickets) connecté par MCP.",
+    "next": "Enregistrez ceci sous forme de skill `/tickets`",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "map-edge-cases-before",
+    "category": "Planifier",
+    "title": "Recenser les cas limites avant de développer",
+    "description": "Demandez ce qui manque, pas ce qui existe. Claude liste les états d'erreur, les états vides et les cas limites qu'une conception centrée sur le scénario nominal a tendance à omettre.",
+    "body": "listez les états d'erreur, les états vides et les cas limites de {{feature}} que la conception doit couvrir",
+    "examples": {
+      "feature": "le flux de téléversement de fichiers"
+    },
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "turn-a-mockup-into",
+    "category": "Prototyper",
+    "title": "Transformer une maquette en prototype fonctionnel",
+    "description": "Un prototype cliquable répond à des questions qu'une maquette statique ne peut pas résoudre. Transmettez le code fonctionnel à l'équipe d'ingénierie au lieu d'expliquer les interactions dans un document.",
+    "body": "voici une maquette. développez un prototype fonctionnel sur lequel je peux cliquer, qui reprend la mise en page et les états présentés",
+    "examples": {},
+    "note": "Colle, glisse ou mentionne avec @ l'image de la maquette dans la conversation.",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "implement-from-a-screenshot",
+    "category": "Prototyper",
+    "title": "Implémenter à partir d'une capture d'écran et vérifier soi-même",
+    "description": "Cela donne à Claude une boucle de vérification : il affiche le rendu, le compare à l'image source et itère sans que vous ayez à signaler chaque écart.",
+    "body": "implémentez ce design, puis faites une capture d'écran du résultat, comparez-la à l'original et corrigez toutes les différences",
+    "examples": {},
+    "note": "Colle, glisse ou mentionne avec @ l'image du design dans la conversation. Nécessite l'accès au navigateur (outils du navigateur de SupaCode).",
+    "next": "Utilisez `/goal` pour que Claude continue d'itérer jusqu'à obtenir des captures d'écran identiques",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "follow-an-existing-pattern",
+    "category": "Implémenter",
+    "title": "Suivre un modèle existant",
+    "description": "Désignez du code qui vous convient déjà. Sans référence, Claude applique des bonnes pratiques générales. Avec une référence, il respecte les conventions réellement utilisées dans votre base de code.",
+    "body": "examinez comment {{example}} est implémenté pour comprendre le modèle, puis développez {{new}} de la même manière",
+    "examples": {
+      "example": "le gestionnaire de webhook existant",
+      "new": "un gestionnaire de webhook de paiements"
+    },
+    "next": "Demandez à Claude d'écrire le modèle qu'il a suivi dans `CLAUDE.md` afin que les sessions futures le respectent sans la référence",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "generate-docs-for-code",
+    "category": "Implémenter",
+    "title": "Générer la documentation du code non documenté",
+    "description": "Nommez la portée et le format. Claude trouve ce qui manque et reprend le style de commentaire déjà utilisé dans le fichier, afin que la nouvelle documentation s'harmonise avec le reste.",
+    "body": "trouvez {{scope}} dépourvues de commentaires {{format}} et ajoutez-en, en reprenant le style déjà utilisé dans le fichier",
+    "examples": {
+      "scope": "les fonctions publiques de src/auth/",
+      "format": "JSDoc"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "add-a-small-well",
+    "category": "Implémenter",
+    "title": "Ajouter une petite fonctionnalité bien définie",
+    "description": "Indiquez les entrées et les sorties, pas la façon de la développer. Claude trouve où se trouve le code similaire et ajoute le vôtre à côté.",
+    "body": "ajoutez un endpoint {{endpoint}} qui renvoie {{payload}}",
+    "examples": {
+      "endpoint": "/health",
+      "payload": "la version de l'application et sa durée de fonctionnement"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "build-a-small-internal",
+    "category": "Implémenter",
+    "title": "Créer un petit outil interne de zéro",
+    "description": "Vous n'avez besoin ni d'un projet, ni d'un framework, ni d'une étape de build. Décrivez l'outil et demandez à Claude de l'ouvrir pour le voir fonctionner immédiatement.",
+    "body": "créez {{tool}} en HTML, CSS et JavaScript vanilla, puis ouvrez-le dans mon navigateur",
+    "examples": {
+      "tool": "un tableau Kanban à glisser-déposer avec trois colonnes"
+    },
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "work-an-issue-end",
+    "category": "Implémenter",
+    "title": "Traiter un ticket de bout en bout",
+    "description": "Donnez le numéro du ticket, pas un résumé. Claude lit lui-même le ticket complet, de sorte que les exigences que vous oublieriez de mentionner sont prises en compte, et il valide la modification avant de vous rendre compte.",
+    "body": "lisez le ticket #{{issue}}, implémentez le correctif et exécutez les tests",
+    "examples": {
+      "issue": "312"
+    },
+    "note": "Nécessite la CLI GitHub (gh) connectée.",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "find-and-update-copy",
+    "category": "Implémenter",
+    "title": "Trouver et mettre à jour des textes dans toute la base de code",
+    "description": "Demandez aussi les variantes et précisez ce qu'il faut ignorer. Claude trouve des formulations qu'une recherche littérale manquerait et laisse intacts les fixtures de test et l'historique : vous ne relisez que les textes réellement visibles par les utilisateurs.",
+    "body": "trouvez chaque endroit où nous écrivons « {{copy}} » ou une variante proche, montrez-moi chacun d'eux en contexte, puis remplacez-les tous par « {{new}} ». ne touchez pas aux tests ni au changelog",
+    "examples": {
+      "copy": "Inscription gratuite",
+      "new": "Commencer l'essai gratuit"
+    },
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "draft-from-past-examples",
+    "category": "Implémenter",
+    "title": "Rédiger un document à partir d'exemples passés",
+    "description": "Désignez un dossier de travaux terminés au lieu de décrire votre style. Claude apprend la structure et le ton à partir de ce que vous avez déjà publié, si bien que le premier brouillon semble avoir été écrit par vous.",
+    "body": "lisez les {{examples}} dans {{folder}} pour en apprendre la structure et le ton, puis rédigez-en une nouvelle pour {{topic}}",
+    "examples": {
+      "examples": "analyses d'impact sur la vie privée",
+      "folder": "legal/pia/",
+      "topic": "la nouvelle intégration analytique"
+    },
+    "next": "Enregistrez le ton sous forme de skill pour que chaque brouillon parte de là",
+    "source": "How Anthropic uses Claude (juridique)"
+  },
+  {
+    "id": "write-tests-run-them",
+    "category": "Tester",
+    "title": "Écrire des tests, les exécuter, corriger les échecs",
+    "description": "Demandez l'écriture, l'exécution et la correction en une seule fois pour que Claude itère sans s'arrêter pour attendre des instructions.",
+    "body": "écrivez des tests pour {{path}}, exécutez-les et corrigez les éventuels échecs",
+    "examples": {
+      "path": "app/parsers/feed.py"
+    },
+    "next": "Exécutez `/init` pour que Claude apprenne automatiquement votre commande de test",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "drive-implementation-from-tests",
+    "category": "Tester",
+    "title": "Piloter l'implémentation par les tests",
+    "description": "Développement piloté par les tests : les tests définissent quand le travail est terminé, et Claude itère sur l'implémentation jusqu'à ce qu'ils réussissent.",
+    "body": "écrivez d'abord des tests pour {{feature}}, puis implémentez-la jusqu'à ce qu'ils réussissent",
+    "examples": {
+      "feature": "le flux de réinitialisation du mot de passe"
+    },
+    "source": "Guide de codage agentique à l'échelle"
+  },
+  {
+    "id": "fill-gaps-from-a",
+    "category": "Tester",
+    "title": "Combler les lacunes à partir d'un rapport de couverture",
+    "description": "Désignez le rapport de couverture au lieu de deviner ce qui n'est pas testé. Claude lit les chiffres réels et écrit des tests pour les fichiers qui en ont le plus besoin.",
+    "body": "lisez {{report}} et ajoutez des tests pour les fichiers les moins couverts jusqu'à ce que chacun dépasse {{target}} %",
+    "examples": {
+      "report": "coverage/coverage-summary.json",
+      "target": "80"
+    },
+    "next": "Définissez ceci comme `/goal` pour que Claude continue d'écrire des tests jusqu'à atteindre l'objectif de couverture",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "migrate-a-pattern-across",
+    "category": "Refactoriser",
+    "title": "Migrer un modèle dans toute la base de code",
+    "description": "Décrivez l'ancien modèle et le nouveau. Demander à Claude d'identifier d'abord chaque emplacement signifie que les sites d'appel sont listés dans la réponse, ce qui vous permet de vérifier qu'aucun n'a été oublié. Pour une migration portant sur de nombreux fichiers, exécutez /batch. Claude découpe le travail en unités que vous approuvez, puis des sous-agents en arrière-plan effectuent les modifications.",
+    "body": "migrez tout de {{from}} vers {{to}} : identifiez chaque emplacement à modifier, puis effectuez les modifications",
+    "examples": {
+      "from": "l'ancienne API de journalisation",
+      "to": "le logger structuré"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "port-code-between-languages",
+    "category": "Refactoriser",
+    "title": "Porter du code vers un autre langage",
+    "description": "Précisez ce qui doit être préservé, pas seulement le langage cible. Nommer l'API ou le comportement qui doit rester identique donne à Claude un contrat par rapport auquel vérifier le portage.",
+    "body": "portez {{source}} en {{target}}, en conservant {{keep}}",
+    "examples": {
+      "source": "ce module Python",
+      "target": "Rust",
+      "keep": "la même API publique et le même comportement des tests"
+    },
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "optimize-against-a-measurable",
+    "category": "Refactoriser",
+    "title": "Optimiser en fonction d'un objectif mesurable",
+    "description": "Indiquer la métrique et l'objectif donne à Claude une définition claire de ce qui est terminé.",
+    "body": "optimisez {{target}} pour faire passer {{metric}} de {{current}} à moins de {{goal}}",
+    "examples": {
+      "target": "la requête de recherche",
+      "metric": "la latence p95",
+      "current": "2s",
+      "goal": "500ms"
+    },
+    "next": "Définissez ceci comme `/goal` pour que Claude continue de mesurer et d'itérer jusqu'à atteindre le chiffre",
+    "source": "Guide de codage agentique à l'échelle"
+  },
+  {
+    "id": "fix-a-precise-visual",
+    "category": "Refactoriser",
+    "title": "Corriger un bug visuel précis",
+    "description": "Un retour visuel précis donne un correctif précis. Indiquez l'élément exact, la mesure et la fenêtre d'affichage.",
+    "body": "le {{element}} dépasse de {{amount}} de la {{container}} sur {{viewport}}. corrigez-le.",
+    "examples": {
+      "element": "bouton de connexion",
+      "amount": "20px",
+      "container": "bordure de la carte",
+      "viewport": "mobile"
+    },
+    "next": "Ajoutez un outil de prévisualisation pour que Claude fasse lui-même une capture d'écran et vérifie le correctif",
+    "source": "Guide de codage agentique à l'échelle"
+  },
+  {
+    "id": "review-your-changes-before",
+    "category": "Relire",
+    "title": "Relire vos modifications avant de créer un commit",
+    "description": "Détectez les problèmes tant qu'ils sont faciles à corriger. Claude lit les fichiers modifiés en entier, pas seulement les lignes du diff, et repère ainsi des problèmes qu'une relecture rapide laisserait passer.",
+    "body": "relisez mes modifications non commitées et signalez tout ce qui semble risqué avant que je crée le commit",
+    "examples": {},
+    "next": "Exécutez `/code-review` pour effectuer la même vérification en une seule commande",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "review-a-pull-request",
+    "category": "Relire",
+    "title": "Relire une pull request",
+    "description": "Claude relit en ayant toute la base de code en contexte, pas seulement le diff. Il lit le code modifié et ce qu'il appelle, et détecte ainsi des problèmes qu'une revue limitée au diff manquerait.",
+    "body": "relisez la PR #{{pr}}, résumez ce qui a changé, puis listez vos éventuelles réserves",
+    "examples": {
+      "pr": "247"
+    },
+    "note": "Nécessite la CLI GitHub (gh) connectée.",
+    "next": "Exécutez `/code-review <pr#>` en une seule commande, ou activez Code Review pour chaque PR",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "review-infrastructure-changes-before",
+    "category": "Relire",
+    "title": "Relire les modifications d'infrastructure avant de les appliquer",
+    "description": "La sortie d'un plan est dense et difficile à parcourir. En la collant, vous obtenez un résumé en langage clair de ce qui va réellement changer avant de l'appliquer.",
+    "body": "voici la sortie de mon plan Terraform. que va-t-il faire, et y a-t-il quelque chose ici qui va poser problème ?",
+    "examples": {},
+    "note": "Colle d'abord la sortie de ton plan dans la conversation.",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "run-a-security-review",
+    "category": "Relire",
+    "title": "Effectuer une revue de sécurité avec un sous-agent",
+    "description": "Un sous-agent effectue l'audit dans sa propre fenêtre de contexte et vous renvoie un résumé, de sorte qu'une longue revue de sécurité ne remplit pas votre session principale. Le sous-agent généraliste intégré s'en charge sans configuration supplémentaire.",
+    "body": "utilisez un sous-agent pour analyser {{path}} à la recherche de problèmes de sécurité et rapportez ce qu'il trouve",
+    "examples": {
+      "path": "src/api/"
+    },
+    "next": "Configurez un sous-agent dédié à la revue de sécurité que toute votre équipe pourra utiliser",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "review-content-before-sending",
+    "category": "Relire",
+    "title": "Détecter les problèmes avant la relecture officielle",
+    "description": "Obtenez une première passe avant qu'une personne n'y consacre du temps. Nommez les points à vérifier pour que la relecture soit ciblée, puis corrigez ce qui a été relevé et envoyez un brouillon plus propre.",
+    "body": "relisez {{file}} en vérifiant {{concerns}} et listez tout ce que je dois corriger avant de l'envoyer à {{reviewer}}",
+    "examples": {
+      "file": "launch-post.md",
+      "concerns": "les affirmations non étayées, les attributions manquantes et les écarts par rapport à la charte de marque",
+      "reviewer": "l'équipe juridique"
+    },
+    "next": "Transformez votre checklist de relecture en skill que toute votre équipe pourra exécuter",
+    "source": "How Anthropic uses Claude (juridique)"
+  },
+  {
+    "id": "course-correct-a-wrong",
+    "category": "Orienter",
+    "title": "Rectifier une mauvaise approche",
+    "description": "Nommez la contrainte que Claude a ignorée, pas seulement le fait que c'est faux. Une raison précise donne à Claude une contrainte concrète à respecter lors de la nouvelle tentative, au lieu de deviner à nouveau.",
+    "body": "ce n'est pas correct : {{feedback}}. essayez une autre approche",
+    "examples": {
+      "feedback": "la signature de la fonction doit rester rétrocompatible"
+    },
+    "next": "Appuyez deux fois sur `Esc` pour ouvrir le menu de retour en arrière et restaurer le code et la conversation, afin que la nouvelle tentative reparte de zéro",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "narrow-the-scope-of",
+    "category": "Orienter",
+    "title": "Restreindre la portée d'une modification",
+    "description": "Lorsque la direction est bonne mais que la modification est allée trop loin, demandez à Claude d'en conserver une partie plutôt que de tout annuler. Une limite explicite empêche un petit correctif de se transformer en refactorisation.",
+    "body": "c'est trop. conservez uniquement les modifications apportées à {{scope}} et annulez vos autres changements",
+    "examples": {
+      "scope": "la logique de validation dans src/forms/"
+    },
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "turn-a-correction-into",
+    "category": "Orienter",
+    "title": "Transformer une correction en règle",
+    "description": "Une correction dans le chat n'est pas partagée avec votre équipe. Une règle dans le CLAUDE.md du projet est partagée dès que vous la commitez, et Claude la lit au début de chaque session.",
+    "body": "vous continuez à {{mistake}}. ajoutez une règle dans CLAUDE.md pour que cela cesse",
+    "examples": {
+      "mistake": "utiliser des exports par défaut alors que ce projet utilise des exports nommés"
+    },
+    "next": "Ouvrez `/memory` pour relire ce que Claude a écrit",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "resolve-merge-conflicts",
+    "category": "Git",
+    "title": "Résoudre les conflits de fusion",
+    "description": "Indiquez l'état souhaité, pas les marqueurs à conserver. Demander le raisonnement rend la fusion vérifiable au lieu d'en faire une boîte noire.",
+    "body": "résolvez les conflits de fusion de cette branche et expliquez ce que vous avez conservé de chaque côté",
+    "examples": {},
+    "source": "Workflows courants"
+  },
+  {
+    "id": "commit-with-a-generated",
+    "category": "Git",
+    "title": "Créer un commit avec un message généré",
+    "description": "Laissez Claude déduire le message du diff. Il respecte le style de commit existant de votre dépôt.",
+    "body": "créez un commit de ces modifications avec un message qui résume ce que j'ai fait",
+    "examples": {},
+    "source": "Workflows courants"
+  },
+  {
+    "id": "open-a-pull-request",
+    "category": "Git",
+    "title": "Ouvrir une pull request à partir d'un ticket",
+    "description": "Évitez de jongler entre l'outil de suivi, l'éditeur et GitHub. Un seul prompt lit la spécification, effectue la modification et ouvre la PR.",
+    "body": "trouvez le ticket concernant {{topic}} dans {{tracker}} et ouvrez une PR qui l'implémente",
+    "examples": {
+      "tracker": "notre outil de suivi des tickets",
+      "topic": "le délai d'expiration de connexion"
+    },
+    "note": "Nécessite un outil de suivi (tickets) connecté par MCP.",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "draft-release-notes-from",
+    "category": "Publier",
+    "title": "Rédiger des notes de version à partir de l'historique Git",
+    "description": "Donnez deux points de référence et la structure souhaitée. Claude lit le log des commits entre les deux et rédige un changelog que vous pouvez modifier.",
+    "body": "comparez {{from}} à {{to}} et rédigez des notes de version regroupées par fonctionnalité, correctif et changement incompatible",
+    "examples": {
+      "from": "v2.3.0",
+      "to": "v2.4.0"
+    },
+    "next": "Enregistrez ceci sous forme de skill `/changelog`",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "write-a-ci-workflow",
+    "category": "Publier",
+    "title": "Écrire un workflow de CI",
+    "description": "Décrivez quand il doit s'exécuter et ce qu'il doit faire ; le YAML est généré pour vous, adapté aux commandes de build et de test de votre projet.",
+    "body": "écrivez un workflow GitHub Actions qui {{steps}} à chaque push sur {{branch}}",
+    "examples": {
+      "steps": "exécute les tests et déploie en préproduction",
+      "branch": "main"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "find-and-fix-a",
+    "category": "Déboguer",
+    "title": "Trouver et corriger un test en échec",
+    "description": "Décrivez le symptôme ; vous n'avez pas besoin de savoir quel fichier est défaillant. Claude exécute le test pour observer l'échec, en remonte la trace jusqu'au code source et le corrige.",
+    "body": "le test {{test}} échoue, trouvez pourquoi et corrigez-le",
+    "examples": {
+      "test": "UserAuth"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "investigate-a-reported-error",
+    "category": "Déboguer",
+    "title": "Enquêter sur une erreur signalée",
+    "description": "Décrivez le symptôme et l'emplacement ; Claude lit le chemin de code concerné et en déduit les causes probables. Collez les stack traces ou les logs si vous en disposez.",
+    "body": "les utilisateurs rencontrent {{symptom}} sur {{where}}. enquêtez et dites-moi ce qui se passe",
+    "examples": {
+      "symptom": "des erreurs 500",
+      "where": "/api/settings"
+    },
+    "next": "Ajoutez dans votre runbook un lien profond qui ouvre Claude avec ce prompt prérempli",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "fix-a-build-error",
+    "category": "Déboguer",
+    "title": "Corriger une erreur de build à la racine",
+    "description": "Demander la cause racine et une vérification évite les correctifs superficiels qui masquent l'erreur sans la résoudre.",
+    "body": "voici une erreur de build. corrigez la cause racine et vérifiez que le build réussit",
+    "examples": {},
+    "note": "Colle d'abord la sortie d'erreur dans la conversation.",
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "investigate-a-production-incident",
+    "category": "Incident",
+    "title": "Enquêter sur un incident de production",
+    "description": "Listez les sources d'information à croiser, pas les étapes à suivre. Claude lit ensemble les logs, l'historique Git et la configuration pour cerner la cause.",
+    "body": "{{symptom}}. vérifiez les logs, les déploiements récents et les changements de configuration, puis dites-moi quelle est la cause la plus probable",
+    "examples": {
+      "symptom": "l'endpoint de paiement a commencé à renvoyer des erreurs 500 il y a une heure"
+    },
+    "next": "Connectez votre outil de suivi des erreurs ou votre stockage de logs via MCP",
+    "source": "Workflows courants"
+  },
+  {
+    "id": "diagnose-from-a-console",
+    "category": "Incident",
+    "title": "Diagnostiquer à partir d'une capture d'écran de console",
+    "description": "Les consoles cloud vous montrent le problème, mais pas les commandes pour le résoudre. Claude lit la capture d'écran et traduit le tableau de bord en commandes kubectl, gcloud ou aws à exécuter.",
+    "body": "voici une capture d'écran de {{console}}. expliquez-moi pourquoi {{resource}} échoue et donnez-moi les commandes exactes pour le corriger",
+    "examples": {
+      "console": "notre tableau de bord Kubernetes",
+      "resource": "ce pod"
+    },
+    "note": "Colle, glisse ou mentionne avec @ la capture d'écran dans la conversation.",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "query-logs-in-plain",
+    "category": "Incident",
+    "title": "Interroger les logs en langage naturel",
+    "description": "Posez la question au lieu d'écrire le SQL. Claude construit la requête, l'exécute sur vos logs connectés et affiche à la fois la requête et le résultat pour que vous puissiez vérifier ce qui a été exécuté.",
+    "body": "montrez-moi toutes les {{events}} pour {{scope}} sur {{timeframe}}. écrivez la requête, exécutez-la et dites-moi ce qui ressort",
+    "examples": {
+      "events": "connexions échouées",
+      "scope": "le service d'authentification",
+      "timeframe": "les dernières 24 heures"
+    },
+    "note": "Nécessite un accès à la base ou aux journaux (MCP).",
+    "source": "How Anthropic uses Claude (cybersécurité)"
+  },
+  {
+    "id": "analyze-a-data-file",
+    "category": "Données",
+    "title": "Analyser un fichier de données",
+    "description": "Une question ponctuelle ne nécessite pas un script ponctuel. Désignez un fichier de votre dossier de projet : Claude le lit directement, identifie les tendances et écrit le résultat à l'endroit demandé.",
+    "body": "lisez {{file}}, résumez les principales tendances et écrivez les résultats dans {{output}}",
+    "examples": {
+      "file": "@reports/q1-signups.csv",
+      "output": "une page HTML avec des graphiques, puis ouvrez-la dans mon navigateur"
+    },
+    "note": "Mentionne ton fichier avec @ ou indique son chemin.",
+    "next": "Connectez la source de données via MCP au lieu d'exporter des fichiers",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "generate-variations-from-performance",
+    "category": "Données",
+    "title": "Générer des variantes à partir de données de performance",
+    "description": "Énoncez la contrainte dès le départ pour que la génération respecte la limite. Claude lit les métriques, choisit ce qu'il faut remplacer et produit des alternatives conformes.",
+    "body": "lisez {{file}}, trouvez les {{items}} les moins performants et générez {{n}} nouvelles variantes de moins de {{limit}} caractères",
+    "examples": {
+      "file": "@ads-performance.csv",
+      "items": "titres",
+      "n": "20",
+      "limit": "90"
+    },
+    "note": "Mentionne ton fichier avec @ ou indique son chemin.",
+    "next": "Connectez la plateforme publicitaire via MCP au lieu d'exporter un fichier",
+    "source": "How Anthropic teams use Claude Code"
+  },
+  {
+    "id": "turn-a-recurring-task",
+    "category": "Automatiser",
+    "title": "Transformer une tâche récurrente en skill",
+    "description": "Nommez les étapes une seule fois ; réutilisez-les sous forme de commande. Claude écrit un skill que n'importe quel membre de votre équipe peut exécuter.",
+    "body": "créez un skill /{{name}} pour ce projet qui {{steps}}",
+    "examples": {
+      "name": "ship",
+      "steps": "exécute le linter et les tests, puis rédige un message de commit"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "add-a-hook-for",
+    "category": "Automatiser",
+    "title": "Ajouter un hook pour un comportement répétitif",
+    "description": "Les hooks rendent un comportement automatique au lieu de vous obliger à penser à le demander. Décrivez le déclencheur et l'action, et Claude écrit la configuration du hook.",
+    "body": "écrivez un hook qui {{action}} après chaque {{event}}",
+    "examples": {
+      "action": "exécute prettier",
+      "event": "modification d'un fichier .ts ou .tsx"
+    },
+    "source": "Bonnes pratiques"
+  },
+  {
+    "id": "connect-a-tool-with",
+    "category": "Automatiser",
+    "title": "Connecter un outil avec MCP",
+    "description": "Connectez la source une fois pour toutes au lieu de coller des données à chaque session. Une fois MCP configuré, Claude lit directement depuis l'outil lorsque vous l'interrogez à son sujet.",
+    "body": "connectez {{server}} via MCP pour pouvoir lire directement ses {{data}}",
+    "examples": {
+      "server": "notre outil de suivi des erreurs",
+      "data": "stack traces"
+    },
+    "source": "Workflows courants"
+  },
+  {
+    "id": "capture-what-to-remember",
+    "category": "Automatiser",
+    "title": "Consigner ce qu'il faut retenir pour la prochaine fois",
+    "description": "Posez la question avant d'oublier. Claude sait ce qu'il a dû comprendre au cours de cette session et propose des entrées pour CLAUDE.md, afin que la session suivante démarre avec ce contexte.",
+    "body": "résumez ce que nous avons fait au cours de cette session et suggérez ce qu'il faudrait ajouter à CLAUDE.md",
+    "examples": {},
+    "source": "How Anthropic teams use Claude Code"
+  }
+]

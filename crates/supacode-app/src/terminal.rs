@@ -49,6 +49,8 @@ pub enum TerminalEvent {
     Output,
     /// L'utilisateur a validé une saisie (Entrée).
     Submitted,
+    /// Le programme a changé le titre du terminal (Claude Code y met le sujet en cours).
+    Title,
     Exited,
 }
 
@@ -63,8 +65,15 @@ pub struct TerminalView {
     size: (usize, usize),
     cell_width: Pixels,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Reste de défilement (pavé tactile) pas encore assez grand pour une ligne.
+    scroll_rest: f32,
     pub title: Option<String>,
     pub exited: bool,
+    /// Dernière frappe de l'utilisateur dans ce terminal.
+    pub last_key: Option<std::time::Instant>,
+    /// L'utilisateur a commencé une saisie qu'il n'a pas encore validée (ni abandonnée par Échap
+    /// ou Ctrl+C) : rien ne doit être injecté dans le terminal, sous peine de la mélanger.
+    pub draft: bool,
     _events: Task<()>,
 }
 
@@ -110,8 +119,11 @@ impl TerminalView {
             size,
             cell_width: px(8.0),
             bounds: Rc::new(Cell::new(None)),
+            scroll_rest: 0.0,
             title: None,
             exited: false,
+            last_key: None,
+            draft: false,
             _events: events,
         }
     }
@@ -122,8 +134,17 @@ impl TerminalView {
 
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
-            TermEvent::Title(title) => self.title = Some(title),
-            TermEvent::ResetTitle => self.title = None,
+            TermEvent::Title(title) => {
+                if self.title.as_deref() != Some(title.as_str()) {
+                    self.title = Some(title);
+                    cx.emit(TerminalEvent::Title);
+                }
+            }
+            TermEvent::ResetTitle => {
+                if self.title.take().is_some() {
+                    cx.emit(TerminalEvent::Title);
+                }
+            }
             TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
             TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             TermEvent::ClipboardLoad(_, format) => {
@@ -175,6 +196,8 @@ impl TerminalView {
         if mods.control && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                 self.paste(&text);
+                self.last_key = Some(std::time::Instant::now());
+                self.draft = true;
             }
             cx.stop_propagation();
             return;
@@ -184,7 +207,15 @@ impl TerminalView {
             // Toute frappe ramène la vue en bas de l'historique.
             self.term.lock().scroll_display(Scroll::Bottom);
             self.write(bytes);
-            if keystroke.key == "enter" && !mods.shift && !mods.control && !mods.alt {
+            self.last_key = Some(std::time::Instant::now());
+            let submit = keystroke.key == "enter" && !mods.shift && !mods.control && !mods.alt;
+            let cancel = keystroke.key == "escape" || (mods.control && keystroke.key == "c");
+            if submit || cancel {
+                self.draft = false;
+            } else if !mods.control && !mods.alt && (keystroke.key_char.is_some() || keystroke.key == "space") {
+                self.draft = true;
+            }
+            if submit {
                 cx.emit(TerminalEvent::Submitted);
             }
             cx.stop_propagation();
@@ -201,14 +232,75 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, event: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let lines = match event.delta {
-            ScrollDelta::Lines(delta) => delta.y.round() as i32 * 3,
-            ScrollDelta::Pixels(delta) => (delta.y / px(LINE_HEIGHT)).round() as i32,
-        };
-        if lines != 0 {
-            self.term.lock().scroll_display(Scroll::Delta(lines));
+        // Crans de molette (positif : vers le haut de l'historique).
+        let steps = match event.delta {
+            ScrollDelta::Lines(delta) => delta.y,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / LINE_HEIGHT / 3.0,
+        } + self.scroll_rest;
+        let whole = steps.trunc();
+        self.scroll_rest = steps - whole;
+        let steps = whole as i32;
+        if steps == 0 {
+            return;
+        }
+        let mode = *self.term.lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            // Programme plein écran qui suit la souris (Claude Code, vim, less…) : c'est lui qui
+            // défile, on lui transmet la molette comme le ferait un vrai terminal.
+            let (col, row) = self.cell_at(event.position);
+            let button = if steps > 0 { 64 } else { 65 };
+            let report = if mode.contains(TermMode::SGR_MOUSE) {
+                format!("\x1b[<{button};{};{}M", col + 1, row + 1)
+            } else {
+                let byte = |v: usize| char::from_u32((32 + v + 1).min(255) as u32).unwrap_or(' ');
+                format!("\x1b[M{}{}{}", char::from(32 + button as u8), byte(col), byte(row))
+            };
+            self.write(report.repeat(steps.unsigned_abs() as usize).into_bytes());
+        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            // Écran alternatif sans souris : la molette devient des flèches.
+            let arrow = match (steps > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => "\x1bOA",
+                (true, false) => "\x1b[A",
+                (false, true) => "\x1bOB",
+                (false, false) => "\x1b[B",
+            };
+            self.write(arrow.repeat(steps.unsigned_abs() as usize * 3).into_bytes());
+        } else {
+            self.term.lock().scroll_display(Scroll::Delta(steps * 3));
             cx.notify();
         }
+    }
+
+    /// Cellule (colonne, ligne) sous un point de la fenêtre.
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
+        let Some(bounds) = self.bounds.get() else { return (0, 0) };
+        let x = f32::from(position.x - bounds.origin.x).max(0.0);
+        let y = f32::from(position.y - bounds.origin.y).max(0.0);
+        let col = (x / f32::from(self.cell_width)) as usize;
+        let row = (y / LINE_HEIGHT) as usize;
+        (col.min(self.size.0.saturating_sub(1)), row.min(self.size.1.saturating_sub(1)))
+    }
+
+    /// Texte affiché à l'écran (lignes visibles, sans les espaces de fin).
+    pub fn screen_text(&self) -> String {
+        let term = self.term.lock();
+        let rows = term.screen_lines();
+        let mut lines: Vec<String> = vec![String::new(); rows];
+        let content = term.renderable_content();
+        let offset = content.display_offset as i32;
+        for indexed in content.display_iter {
+            let row = indexed.point.line.0 + offset;
+            if row < 0 || row as usize >= rows || indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let c = indexed.cell.c;
+            lines[row as usize].push(if c == '\0' { ' ' } else { c });
+        }
+        let lines: Vec<&str> = lines.iter().map(|l| l.trim_end()).collect();
+        let start = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+        let end = lines.iter().rposition(|l| !l.is_empty()).map_or(start, |i| i + 1);
+        lines[start..end].join("
+")
     }
 }
 

@@ -119,7 +119,7 @@ pub fn diff_file(root: &Path, path: &Path) -> Option<ChangedFile> {
 }
 
 fn git_show_head(root: &Path, relative: &str) -> Option<String> {
-    let output = Command::new("git").arg("-C").arg(root).arg("show").arg(format!("HEAD:{relative}")).output().ok()?;
+    let output = crate::desktop::no_window(Command::new("git").arg("-C").arg(root).arg("show").arg(format!("HEAD:{relative}"))).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -136,7 +136,7 @@ pub fn revert(root: &Path, file: &ChangedFile) -> std::io::Result<()> {
 
 /// Branche git courante du projet.
 pub fn git_branch(root: &Path) -> Option<String> {
-    let output = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
+    let output = crate::desktop::no_window(Command::new("git").arg("-C").arg(root).args(["rev-parse", "--abbrev-ref", "HEAD"])).output().ok()?;
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (output.status.success() && !branch.is_empty()).then_some(branch)
 }

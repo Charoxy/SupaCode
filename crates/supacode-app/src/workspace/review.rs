@@ -66,11 +66,26 @@ impl Workspace {
     pub(super) fn toggle_checkpoints(&mut self, cx: &mut Context<Self>) {
         self.checkpoints_open = !self.checkpoints_open;
         if self.checkpoints_open {
-            if let Some(tab) = self.active_tab() {
-                self.checkpoint_list = git::checkpoints(&tab.project.path, &tab.conversation_id);
-            }
+            self.load_checkpoints(cx);
         }
         cx.notify();
+    }
+
+    /// Points de retour de l'onglet actif, lus en arrière-plan (git).
+    pub(super) fn load_checkpoints(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else { return };
+        let (root, group) = (tab.project.path.clone(), tab.conversation_id.clone());
+        cx.spawn(async move |this, cx| {
+            let group2 = group.clone();
+            let list = cx.background_executor().spawn(async move { git::checkpoints(&root, &group2) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.active_tab().is_some_and(|t| t.conversation_id == group) {
+                    this.checkpoint_list = list;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn restore_checkpoint(&mut self, checkpoint: Checkpoint, window: &mut Window, cx: &mut Context<Self>) {
@@ -163,69 +178,103 @@ impl Workspace {
 
     // — Diff : lignes, côte à côte, commentaires
 
-    pub(super) fn render_diff_lines(&self, file: &ChangedFile, mode: PreviewMode, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let commenting = self.line_comment.as_ref().filter(|c| c.file == file.relative).map(|c| c.index);
+    /// Lignes du fichier affiché. Liste virtuelle : seules les lignes visibles sont construites,
+    /// même pour un fichier de plusieurs milliers de lignes.
+    pub(super) fn render_diff_list(&self, file: &ChangedFile, mode: PreviewMode, cx: &mut Context<Self>) -> UniformList {
+        let relative = file.relative.clone();
+        // Ligne la plus longue : elle donne la largeur de la liste (défilement horizontal).
+        let widest = |indices: &mut dyn Iterator<Item = (usize, usize)>| indices.max_by_key(|(_, line)| file.lines[*line].text.len()).map(|(row, _)| row);
         if mode == PreviewMode::Split {
-            return split_rows(&file.lines)
-                .into_iter()
-                .enumerate()
-                .map(|(row, (left, right))| {
-                    let index = right.or(left).unwrap_or(0);
-                    let side = |line: Option<usize>| {
-                        let line = line.and_then(|i| file.lines.get(i));
-                        let (bg, gutter) = match line.map(|l| l.kind) {
-                            Some(LineKind::Added) => (Some(T.add_bg), Some(T.add_gutter)),
-                            Some(LineKind::Removed) => (Some(T.del_bg), Some(T.del_gutter)),
-                            _ => (None, None),
-                        };
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .flex()
-                            .when_some(bg, |d, bg| d.bg(bg))
-                            .when(line.is_none(), |d| d.bg(T.panel))
-                            .child(div().w(px(40.0)).flex_shrink_0().pr_2().flex().justify_end().text_color(T.text3).when_some(gutter, |d, g| d.bg(g)).child(line.and_then(|l| l.number).map(|n| n.to_string()).unwrap_or_default()))
-                            .child(div().pl_1().whitespace_nowrap().children(line.map(|l| code_text(&l.text, &l.spans))))
-                    };
-                    let row_el = div()
-                        .id(("split-row", row))
-                        .flex()
-                        .h(px(20.0))
-                        .cursor_pointer()
-                        .hover(|d| d.opacity(0.9))
-                        .on_click(self.comment_listener(file, index, cx))
-                        .child(side(left))
-                        .child(div().w(px(1.0)).flex_shrink_0().bg(T.border))
-                        .child(side(right));
-                    self.with_comment_box(row_el.into_any_element(), commenting == Some(index), cx)
-                })
-                .collect();
+            let rows = split_rows(&file.lines);
+            let measure = widest(&mut rows.iter().enumerate().filter_map(|(row, (left, right))| right.or(*left).map(|i| (row, i))));
+            let count = rows.len();
+            return uniform_list(
+                "code",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    let Some(file) = this.shown_file(&relative) else { return Vec::new() };
+                    rows[range.clone()].iter().zip(range).map(|(&(left, right), row)| this.split_row(&file, row, left, right, cx)).collect()
+                }),
+            )
+            .with_width_from_item(measure)
+            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained);
         }
-        file.lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| mode == PreviewMode::Diff || l.kind != LineKind::Removed)
-            .map(|(index, line)| {
-                let (bg, gutter, sign, sign_color) = match line.kind {
-                    LineKind::Added => (Some(T.add_bg), Some(T.add_gutter), "+", T.add_fg),
-                    LineKind::Removed => (Some(T.del_bg), Some(T.del_gutter), "−", T.del_fg),
-                    LineKind::Same => (None, None, " ", T.text3),
-                };
-                let row = div()
-                    .id(("code-line", index))
-                    .flex()
-                    .h(px(20.0))
-                    .cursor_pointer()
-                    .when_some(bg, |d, bg| d.bg(bg))
-                    .hover(|d| d.bg(T.hover))
-                    .on_click(self.comment_listener(file, index, cx))
-                    .child(div().w(px(48.0)).flex_shrink_0().pr_2().flex().justify_end().text_color(T.text3).when_some(gutter, |d, g| d.bg(g)).child(line.number.map(|n| n.to_string()).unwrap_or_default()))
-                    .child(div().w(px(18.0)).flex_shrink_0().text_center().text_color(sign_color).child(sign))
-                    .child(div().whitespace_nowrap().child(code_text(&line.text, &line.spans)));
-                self.with_comment_box(row.into_any_element(), commenting == Some(index), cx)
-            })
-            .collect()
+        let indices: Vec<usize> = file.lines.iter().enumerate().filter(|(_, l)| mode == PreviewMode::Diff || l.kind != LineKind::Removed).map(|(i, _)| i).collect();
+        let measure = widest(&mut indices.iter().copied().enumerate());
+        uniform_list(
+            "code",
+            indices.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                let Some(file) = this.shown_file(&relative) else { return Vec::new() };
+                indices[range].iter().map(|&index| this.diff_row(&file, index, cx)).collect()
+            }),
+        )
+        .with_width_from_item(measure)
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+    }
+
+    /// Fichier modifié affiché dans le panneau de code.
+    fn shown_file(&self, relative: &str) -> Option<std::rc::Rc<ChangedFile>> {
+        self.active_tab()?.changed.iter().find(|f| f.relative == relative).cloned()
+    }
+
+    fn split_row(&self, file: &ChangedFile, row: usize, left: Option<usize>, right: Option<usize>, cx: &mut Context<Self>) -> AnyElement {
+        let index = right.or(left).unwrap_or(0);
+        let side = |line: Option<usize>| {
+            let line = line.and_then(|i| file.lines.get(i));
+            let (bg, gutter) = match line.map(|l| l.kind) {
+                Some(LineKind::Added) => (Some(T.add_bg), Some(T.add_gutter)),
+                Some(LineKind::Removed) => (Some(T.del_bg), Some(T.del_gutter)),
+                _ => (None, None),
+            };
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .when_some(bg, |d, bg| d.bg(bg))
+                .when(line.is_none(), |d| d.bg(T.panel))
+                .child(div().w(px(40.0)).flex_shrink_0().pr_2().flex().justify_end().text_color(T.text3).when_some(gutter, |d, g| d.bg(g)).child(line.and_then(|l| l.number).map(|n| n.to_string()).unwrap_or_default()))
+                .child(div().pl_1().whitespace_nowrap().children(line.map(|l| code_text(&l.text, &l.spans))))
+        };
+        div()
+            .id(("split-row", row))
+            .flex()
+            .h(px(20.0))
+            .cursor_pointer()
+            .hover(|d| d.opacity(0.9))
+            .when(self.is_commenting(file, index), |d| d.border_l_2().border_color(T.accent))
+            .on_click(self.comment_listener(file, index, cx))
+            .child(side(left))
+            .child(div().w(px(1.0)).flex_shrink_0().bg(T.border))
+            .child(side(right))
+            .into_any_element()
+    }
+
+    fn diff_row(&self, file: &ChangedFile, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let line = &file.lines[index];
+        let (bg, gutter, sign, sign_color) = match line.kind {
+            LineKind::Added => (Some(T.add_bg), Some(T.add_gutter), "+", T.add_fg),
+            LineKind::Removed => (Some(T.del_bg), Some(T.del_gutter), "−", T.del_fg),
+            LineKind::Same => (None, None, " ", T.text3),
+        };
+        div()
+            .id(("code-line", index))
+            .flex()
+            .h(px(20.0))
+            .cursor_pointer()
+            .when_some(bg, |d, bg| d.bg(bg))
+            .hover(|d| d.bg(T.hover))
+            .when(self.is_commenting(file, index), |d| d.bg(T.hover))
+            .on_click(self.comment_listener(file, index, cx))
+            .child(div().w(px(48.0)).flex_shrink_0().pr_2().flex().justify_end().text_color(T.text3).when_some(gutter, |d, g| d.bg(g)).child(line.number.map(|n| n.to_string()).unwrap_or_default()))
+            .child(div().w(px(18.0)).flex_shrink_0().text_center().text_color(sign_color).child(sign))
+            .child(div().whitespace_nowrap().child(code_text(&line.text, &line.spans)))
+            .into_any_element()
+    }
+
+    fn is_commenting(&self, file: &ChangedFile, index: usize) -> bool {
+        self.line_comment.as_ref().is_some_and(|c| c.file == file.relative && c.index == index)
     }
 
     fn comment_listener(&self, file: &ChangedFile, index: usize, cx: &mut Context<Self>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
@@ -243,45 +292,48 @@ impl Workspace {
         })
     }
 
-    fn with_comment_box(&self, row: AnyElement, open: bool, cx: &mut Context<Self>) -> AnyElement {
-        if !open {
-            return row;
-        }
-        div()
-            .flex()
-            .flex_col()
-            .child(row)
-            .child(
-                div()
-                    .mx_3()
-                    .my_1p5()
-                    .p_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(T.accent)
-                    .bg(T.raised)
-                    .font_family(theme::UI_FONT)
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.comment_input).appearance(false)))
-                    .child(
-                        div()
-                            .id("line-comment-send")
-                            .h(px(24.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded(px(5.0))
-                            .bg(T.accent_bg)
-                            .text_color(T.accent_on)
-                            .text_size(px(12.0))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, window, cx| this.send_line_comment(window, cx)))
-                            .child("Envoyer à l'agent"),
-                    ),
-            )
-            .into_any_element()
+    /// Champ du commentaire de la ligne choisie, sous la liste (les lignes gardent toutes la
+    /// même hauteur, ce qu'exige la liste virtuelle).
+    pub(super) fn render_comment_box(&self, file: &ChangedFile, cx: &mut Context<Self>) -> Option<Div> {
+        let comment = self.line_comment.as_ref().filter(|c| c.file == file.relative)?;
+        let line = file.lines.get(comment.index)?;
+        let place = match (line.kind, line.number) {
+            (LineKind::Removed, _) => "Ligne supprimée".to_owned(),
+            (_, Some(n)) => format!("Ligne {n}"),
+            _ => "Ligne".to_owned(),
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .mx_3()
+                .my_1p5()
+                .p_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(T.accent)
+                .bg(T.raised)
+                .font_family(theme::UI_FONT)
+                .child(div().flex_shrink_0().text_size(px(12.0)).text_color(T.text3).child(place))
+                .child(div().flex_1().min_w_0().child(Input::new(&self.comment_input).appearance(false)))
+                .child(
+                    div()
+                        .id("line-comment-send")
+                        .h(px(24.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.0))
+                        .bg(T.accent_bg)
+                        .text_color(T.accent_on)
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| this.send_line_comment(window, cx)))
+                        .child("Envoyer à l'agent"),
+                ),
+        )
     }
 
     /// Commentaire sur une ligne : part dans la conversation, avec le fichier et la ligne.

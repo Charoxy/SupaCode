@@ -122,7 +122,7 @@ impl Workspace {
                 }
             });
         });
-        self._tasks.push(task);
+        task.detach();
     }
 
     /// Rafraîchit coûts et journal toutes les minutes (barre d'état, budgets).
@@ -151,7 +151,7 @@ impl Workspace {
                 }
             });
         });
-        self._tasks.push(task);
+        task.detach();
     }
 
     /// Règles du projet pour lancer un agent ; `Err` si le fichier est invalide.
@@ -178,7 +178,7 @@ impl Workspace {
         let Some(project) = self.team_project() else { return };
         let path = project.path.join(policy::FILE);
         // Ouvert avec l'éditeur associé aux fichiers JSON.
-        let opened = std::process::Command::new("cmd").args(["/c", "start", ""]).arg(&path).spawn();
+        let opened = crate::desktop::open_path(&path);
         if opened.is_err() {
             self.open_file(&project.path, policy::FILE.into(), cx);
         }

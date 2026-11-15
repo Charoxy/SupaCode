@@ -6,6 +6,7 @@
 mod ask;
 mod browser;
 mod creator;
+mod desktop;
 mod editor;
 mod highlight;
 mod icons;

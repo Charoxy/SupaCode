@@ -37,6 +37,14 @@ pub const SHIELD: &str = svg!(r#"<path stroke-width="1.4" d="M8 1.8l5 1.9v4c0 3.
 pub const QUOTE: &str = svg!(r#"<path stroke-width="1.4" d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H8l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/><path stroke-width="1.4" d="M5 6.5h6M5 8.5h4"/>"#);
 pub const PUZZLE: &str = svg!(r#"<path stroke-width="1.4" d="M6 2.5a1.5 1.5 0 0 1 3 0V4h3a1 1 0 0 1 1 1v3h-1.5a1.5 1.5 0 0 0 0 3H13v2.5a1 1 0 0 1-1 1H9V13a1.5 1.5 0 0 0-3 0v1.5H3a1 1 0 0 1-1-1V10h1.5a1.5 1.5 0 0 0 0-3H2V5a1 1 0 0 1 1-1h3z"/>"#);
 pub const LAYERS: &str = svg!(r#"<path stroke-width="1.4" d="M8 2l6 3-6 3-6-3z"/><path stroke-width="1.4" d="M2 8l6 3 6-3M2 11l6 3 6-3"/>"#);
+pub const GRID: &str = svg!(r#"<rect stroke-width="1.4" x="2" y="2" width="5" height="5" rx="1"/><rect stroke-width="1.4" x="9" y="2" width="5" height="5" rx="1"/><rect stroke-width="1.4" x="2" y="9" width="5" height="5" rx="1"/><rect stroke-width="1.4" x="9" y="9" width="5" height="5" rx="1"/>"#);
+pub const PANEL_RIGHT: &str = svg!(r#"<rect stroke-width="1.4" x="2" y="3" width="12" height="10" rx="1.5"/><path stroke-width="1.4" d="M10 3v10"/>"#);
+pub const PANEL_LEFT: &str = svg!(r#"<rect stroke-width="1.4" x="2" y="3" width="12" height="10" rx="1.5"/><path stroke-width="1.4" d="M6 3v10"/>"#);
+pub const AGENTS: &str =svg!(r#"<circle stroke-width="1.4" cx="6" cy="5.5" r="2.2"/><path stroke-width="1.4" d="M2 13c0-2.2 1.8-3.8 4-3.8s4 1.6 4 3.8"/><circle stroke-width="1.4" cx="11.3" cy="6.2" r="1.7"/><path stroke-width="1.4" d="M11 9.3c1.8.1 3 1.5 3 3.4"/>"#);
+pub const CUBE: &str = svg!(r#"<path stroke-width="1.4" d="M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8z"/><path stroke-width="1.4" d="M2.7 4.9L8 8l5.3-3.1M8 8v6"/>"#);
+pub const SLIDERS: &str = svg!(r#"<path stroke-width="1.4" d="M3 4.5h10M3 11.5h10"/><circle stroke-width="1.4" fill="currentColor" cx="6" cy="4.5" r="1.4"/><circle stroke-width="1.4" fill="currentColor" cx="10.5" cy="11.5" r="1.4"/>"#);
+pub const EYE: &str = svg!(r#"<path stroke-width="1.4" d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 8 12.2 1.8 8 1.8 8z"/><circle stroke-width="1.4" cx="8" cy="8" r="2"/>"#);
+pub const EYE_OFF: &str = svg!(r#"<path stroke-width="1.4" d="M2.5 2.5l11 11M6.3 4.1A6 6 0 0 1 8 3.8c4 0 6.2 4.2 6.2 4.2a10 10 0 0 1-1.7 2.2M10.4 11.6A5.6 5.6 0 0 1 8 12.2C4 12.2 1.8 8 1.8 8a10 10 0 0 1 2.3-2.8"/>"#);
 pub const HISTORY: &str = svg!(r#"<path stroke-width="1.4" d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path stroke-width="1.4" d="M2.5 2.5v2.5H5M8 5v3l2 1.5"/>"#);
 pub const APPROVE: &str = svg!(r#"<circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/>"#);
 /// Le « S » du logo (posé sur un carré arrondi couleur accent : GPUI dessine les SVG d'une seule couleur).
