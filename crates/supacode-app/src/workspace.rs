@@ -3588,8 +3588,14 @@ fn write_layout_file(value: serde_json::Map<String, serde_json::Value>) {
     let _ = std::fs::write(file, serde_json::to_string_pretty(&serde_json::Value::Object(value)).unwrap_or_default());
 }
 
+/// Outils masqués au premier lancement : on les réaffiche depuis le menu « Outils affichés ».
+const HIDDEN_BY_DEFAULT: [&str; 1] = ["roblox"];
+
 fn load_hidden_tools() -> HashSet<String> {
-    read_layout_file().get("outils_masques").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect()
+    match read_layout_file().get("outils_masques").and_then(|v| v.as_array()) {
+        Some(list) => list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+        None => HIDDEN_BY_DEFAULT.iter().map(|k| (*k).to_owned()).collect(),
+    }
 }
 
 fn save_hidden_tools(hidden: &HashSet<String>) {
