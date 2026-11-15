@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use supacode_core::claude::{self, Conversation, Project};
 use supacode_core::engine::RunStatus;
+use supacode_core::router::AgentId;
 use supacode_core::time::relative;
 use supacode_core::workflows::{Trigger, WorkflowFile, load_workflows};
 
@@ -72,6 +73,29 @@ struct Tab {
     last_output: Option<Instant>,
     /// Messages d'autres agents pas encore remis (voir `agents::deliver_messages`).
     inbox: Vec<String>,
+    /// Agent qui tourne dans ce terminal.
+    agent: AgentId,
+    /// Modèle demandé au lancement (alias de la CLI), s'il est connu.
+    model: Option<String>,
+    /// Fenêtre de l'agent qui a créé celui-ci avec `agents_spawn`.
+    parent: Option<usize>,
+}
+
+/// Comment lancer un agent : par défaut, Claude Code ouvert par l'utilisateur.
+#[derive(Default)]
+struct Launch {
+    /// Codex au lieu de Claude Code.
+    agent: Option<AgentId>,
+    /// Modèle imposé (sinon celui des règles d'équipe, sinon celui de la CLI).
+    model: Option<String>,
+    /// Titre de la tuile en attendant celui que donne l'agent.
+    title: Option<String>,
+    /// Agent qui a créé celui-ci.
+    parent: Option<usize>,
+    /// Consigne ajoutée au prompt système.
+    brief: Option<String>,
+    /// Ne prend pas le focus : l'utilisateur (ou l'agent qui crée) garde la main.
+    background: bool,
 }
 
 /// Onglet de la barre latérale.
@@ -744,15 +768,18 @@ impl Workspace {
 
     /// Ouvre une conversation (ou la ramène au premier plan) ; sans conversation : une nouvelle.
     fn open_conversation(&mut self, project: Project, conversation: Option<Conversation>, prompt: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_conversation_checked(project, conversation, prompt, false, window, cx);
+        self.open_conversation_checked(project, conversation, prompt, Launch::default(), false, window, cx);
     }
 
-    fn open_conversation_checked(&mut self, project: Project, conversation: Option<Conversation>, prompt: Option<String>, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ouvre la conversation et renvoie le numéro de sa fenêtre (`None` si elle n'a pas été lancée,
+    /// ou pas encore : une confirmation est demandée).
+    #[allow(clippy::too_many_arguments)]
+    fn open_conversation_checked(&mut self, project: Project, conversation: Option<Conversation>, prompt: Option<String>, launch: Launch, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
         if let Some(conv) = &conversation {
             if let Some(tab) = self.tabs.iter().find(|t| t.conversation_id == conv.id) {
                 let id = tab.id;
                 self.activate(id, window, cx);
-                return;
+                return Some(id);
             }
         }
         if let Some(conv) = &conversation {
@@ -767,11 +794,11 @@ impl Workspace {
                 );
                 let task = cx.spawn_in(window, async move |this, cx| {
                     if answer.await == Ok(0) {
-                        let _ = this.update_in(cx, |this, window, cx| this.open_conversation_checked(project, conversation, prompt, true, window, cx));
+                        let _ = this.update_in(cx, |this, window, cx| this.open_conversation_checked(project, conversation, prompt, launch, true, window, cx));
                     }
                 });
                 self._tasks.push(task);
-                return;
+                return None;
             }
         }
         // Une nouvelle conversation reçoit son identifiant tout de suite : son titre réel
@@ -781,13 +808,81 @@ impl Workspace {
             Ok(policy) => policy,
             Err(error) => {
                 self.toast(format!("Conversation non ouverte, règles d'équipe invalides : {error}"), cx);
-                return;
+                return None;
             }
         };
-        if policy.as_ref().is_some_and(|p| !p.agent_allowed(supacode_core::router::AgentId::Claude)) {
-            self.toast("Les règles d'équipe de ce projet n'autorisent pas Claude.", cx);
-            return;
+        let agent = launch.agent.unwrap_or(AgentId::Claude);
+        if policy.as_ref().is_some_and(|p| !p.agent_allowed(agent)) {
+            self.toast(format!("Les règles d'équipe de ce projet n'autorisent pas {}.", agent.label()), cx);
+            return None;
         }
+        let agent_id = self.next_tab_id;
+        let command = if agent == AgentId::Codex {
+            // Codex n'a ni hooks ni serveur MCP de SupaCode : la consigne part avec la demande.
+            let mut args = Vec::new();
+            if let Some(model) = &launch.model {
+                args.extend(["-m".to_owned(), model.clone()]);
+            }
+            let request = match (&launch.brief, &prompt) {
+                (Some(brief), Some(prompt)) => Some(format!("{prompt}\n\n({brief})")),
+                _ => prompt.clone(),
+            };
+            args.extend(request);
+            Command { program: "codex".into(), args, cwd: project.path.clone() }
+        } else {
+            self.claude_command(&project, conversation.as_ref(), &session, policy.as_ref(), &launch, agent_id, prompt.clone())
+        };
+        audit::record(
+            &project.path,
+            kind::CONVERSATION,
+            match &conversation {
+                Some(c) => format!("Conversation reprise : {}", c.title),
+                None => format!(
+                    "Nouvelle conversation{}{}",
+                    launch.parent.map(|p| format!(" (sous-agent de #{p}, {})", model_label(agent, launch.model.as_deref()))).unwrap_or_default(),
+                    prompt.as_deref().map(|p| format!(" : {}", p.chars().take(160).collect::<String>())).unwrap_or_default()
+                ),
+            },
+            serde_json::json!({ "conversation": session }),
+            None,
+        );
+        let terminal = cx.new(|cx| TerminalView::new(command, window, cx));
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.watch_terminal(id, &terminal, cx);
+        let title = launch.title.clone().or_else(|| conversation.as_ref().map(|c| c.title.clone())).unwrap_or_else(|| "Nouvelle conversation".into());
+        let unsaved = conversation.is_none();
+        self.tabs.push(Tab {
+            id,
+            project: project.clone(),
+            conversation_id: session,
+            unsaved,
+            title,
+            live_title: None,
+            busy_title: false,
+            terminal,
+            changed: Vec::new(),
+            selected_file: 0,
+            last_output: None,
+            inbox: Vec::new(),
+            agent,
+            model: launch.model.clone(),
+            parent: launch.parent,
+        });
+        // Une nouvelle conversation prend sa place dans la grille.
+        self.grid_zoomed = false;
+        if launch.background {
+            cx.notify();
+        } else {
+            self.selected_project = Some(project_key(&project));
+            self.activate(id, window, cx);
+        }
+        Some(id)
+    }
+
+    /// Ligne de commande de Claude Code pour une fenêtre d'agent.
+    #[allow(clippy::too_many_arguments)]
+    fn claude_command(&self, project: &Project, conversation: Option<&Conversation>, session: &str, policy: Option<&supacode_core::policy::Policy>, launch: &Launch, agent_id: usize, prompt: Option<String>) -> Command {
         let mut args = Vec::new();
         let from_policy = policy.as_ref().and_then(|p| p.claude_settings()).and_then(|s| serde_json::from_str(&s).ok());
         let mut settings = supacode_core::extensions::merge_settings(from_policy, self.extension_settings(&project.path));
@@ -798,40 +893,36 @@ impl Workspace {
         if let Some(settings) = settings {
             args.extend(["--settings".to_owned(), settings.to_string()]);
         }
-        // Modèles restreints : le premier modèle Claude permis.
-        if let Some(model) = policy.as_ref().and_then(|p| p.models.iter().find(|m| m.starts_with("claude") && !m.contains('*')).cloned()) {
+        // Modèle imposé au lancement ; sinon, si les modèles sont restreints, le premier modèle Claude permis.
+        let model = launch.model.clone().or_else(|| policy.and_then(|p| p.models.iter().find(|m| m.starts_with("claude") && !m.contains('*')).cloned()));
+        if let Some(model) = model {
             args.extend(["--model".to_owned(), model]);
         }
-        let browser_allowed = policy.as_ref().is_none_or(|p| p.browser) && self.browser_tools_enabled();
+        let browser_allowed = policy.is_none_or(|p| p.browser) && self.browser_tools_enabled();
         // Chaque fenêtre a sa propre adresse : le serveur sait quel agent l'appelle.
-        let agent_id = self.next_tab_id;
         if let Some(url) = &self.mcp_url {
             let url = format!("{url}?agent={agent_id}{}", if browser_allowed { "" } else { ",browser=0" });
             let config = serde_json::json!({ "mcpServers": { "supacode": { "type": "http", "url": url } } }).to_string();
             // Les options à plusieurs valeurs doivent chacune être suivies d'une autre option.
             args.extend(["--mcp-config".to_owned(), config, "--allowedTools".to_owned(), "mcp__supacode".to_owned()]);
-            args.extend(["--append-system-prompt".to_owned(), self.agent_prompt(agent_id)]);
+            let mut system = self.agent_prompt(agent_id);
+            if let Some(brief) = &launch.brief {
+                system.push_str("\n\n");
+                system.push_str(brief);
+            }
+            args.extend(["--append-system-prompt".to_owned(), system]);
         }
-        args.extend(match &conversation {
-            Some(_) => ["--resume".to_owned(), session.clone()],
-            None => ["--session-id".to_owned(), session.clone()],
+        args.extend(match conversation {
+            Some(_) => ["--resume".to_owned(), session.to_owned()],
+            None => ["--session-id".to_owned(), session.to_owned()],
         });
-        audit::record(
-            &project.path,
-            kind::CONVERSATION,
-            match &conversation {
-                Some(c) => format!("Conversation reprise : {}", c.title),
-                None => format!("Nouvelle conversation{}", prompt.as_deref().map(|p| format!(" : {}", p.chars().take(160).collect::<String>())).unwrap_or_default()),
-            },
-            serde_json::json!({ "conversation": session }),
-            None,
-        );
         args.extend(prompt);
-        let command = Command { program: "claude".into(), args, cwd: project.path.clone() };
-        let terminal = cx.new(|cx| TerminalView::new(command, window, cx));
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
-        cx.subscribe(&terminal, move |this, _, event, cx| {
+        Command { program: "claude".into(), args, cwd: project.path.clone() }
+    }
+
+    /// Suit les évènements du terminal d'une fenêtre d'agent.
+    fn watch_terminal(&mut self, id: usize, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        cx.subscribe(terminal, move |this, _, event, cx| {
             if matches!(event, TerminalEvent::Submitted) {
                 this.take_checkpoint(id, cx);
                 return;
@@ -860,13 +951,6 @@ impl Workspace {
             cx.notify();
         })
         .detach();
-        let title = conversation.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "Nouvelle conversation".into());
-        let unsaved = conversation.is_none();
-        self.tabs.push(Tab { id, project: project.clone(), conversation_id: session, unsaved, title, live_title: None, busy_title: false, terminal, changed: Vec::new(), selected_file: 0, last_output: None, inbox: Vec::new() });
-        self.selected_project = Some(project_key(&project));
-        // Une nouvelle conversation prend sa place dans la grille.
-        self.grid_zoomed = false;
-        self.activate(id, window, cx);
     }
 
     /// Passe de l'affichage par onglets à la grille, et inversement.
@@ -1202,6 +1286,14 @@ impl Workspace {
         let calls = server.calls;
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(call) = calls.recv().await {
+                // Créer des fenêtres demande la fenêtre de l'application.
+                if call.tool == mcp::SPAWN_TOOL {
+                    let Ok(result) = this.update_in(cx, |this, window, cx| this.spawn_agents(call.agent, &call.args, window, cx)) else {
+                        break;
+                    };
+                    let _ = call.reply.send(result).await;
+                    continue;
+                }
                 if call.tool.starts_with("agent") {
                     let Ok(result) = this.update(cx, |this, cx| this.agent_tool(call.agent, &call.tool, &call.args, cx)) else {
                         break;
@@ -2583,6 +2675,23 @@ impl Workspace {
             .child(div().size(px(7.0)).flex_shrink_0().rounded_full().bg(state.color()).opacity(if state == agents::AgentState::Working && !self.pulse { 0.35 } else { 1.0 }))
             .child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(format!("#{id}")))
             .child(div().flex_1().min_w_0().truncate().text_size(px(12.0)).text_color(if selected { T.text } else { T.text2 }).child(tab.display_title()))
+            // Agent et modèle de la fenêtre ; pour un sous-agent, l'agent qui l'a créé.
+            .child({
+                let (svg, color) = if tab.agent == AgentId::Codex { (icons::CODEX, T.codex) } else { (icons::CLAUDE, T.claude) };
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded(px(4.0))
+                    .bg(T.app)
+                    .text_size(px(11.0))
+                    .text_color(T.text2)
+                    .child(icon(svg).size(px(10.0)).text_color(color))
+                    .child(model_label(tab.agent, tab.model.as_deref()))
+            })
+            .when_some(tab.parent, |d, parent| d.child(div().flex_shrink_0().text_size(px(11.0)).text_color(T.text3).child(format!("de #{parent}"))))
             .child(div().flex_shrink_0().max_w(px(120.0)).truncate().text_size(px(11.0)).text_color(T.text3).child(tab.project.name.clone()))
             .child(div().flex_shrink_0().px_1p5().rounded(px(4.0)).text_size(px(11.0)).text_color(state.color()).bg(T.app).child(state.label()))
             .when(!tab.inbox.is_empty(), |d| {
@@ -3400,6 +3509,23 @@ impl Tab {
     }
 }
 
+/// « Opus », « Sonnet »… pour Claude ; « Codex » ; « Claude » si le modèle n'est pas connu.
+fn model_label(agent: AgentId, model: Option<&str>) -> String {
+    let Some(model) = model.filter(|m| !m.is_empty()) else { return agent.label().to_owned() };
+    if agent == AgentId::Codex {
+        return format!("Codex {model}");
+    }
+    let lower = model.to_lowercase();
+    for family in ["opus", "sonnet", "haiku"] {
+        if lower.contains(family) {
+            let mut name = family.to_owned();
+            name[..1].make_ascii_uppercase();
+            return name;
+        }
+    }
+    model.to_owned()
+}
+
 /// Titre de terminal sans l'animation ni l'icône de Claude Code ; `None` s'il n'apprend rien.
 fn clean_title(raw: &str) -> Option<String> {
     let text = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
@@ -3486,7 +3612,16 @@ fn grid_rows(count: usize) -> Vec<usize> {
 
 #[cfg(test)]
 mod grid_tests {
-    use super::grid_rows;
+    use super::{AgentId, grid_rows, model_label};
+
+    #[test]
+    fn nomme_le_modele_de_chaque_tuile() {
+        assert_eq!(model_label(AgentId::Claude, Some("opus")), "Opus");
+        assert_eq!(model_label(AgentId::Claude, Some("claude-sonnet-4-5")), "Sonnet");
+        assert_eq!(model_label(AgentId::Claude, None), "Claude");
+        assert_eq!(model_label(AgentId::Codex, None), "Codex");
+        assert_eq!(model_label(AgentId::Codex, Some("gpt-5-codex")), "Codex gpt-5-codex");
+    }
 
     #[test]
     fn repartit_les_cases_sans_en_perdre() {

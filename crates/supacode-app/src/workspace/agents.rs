@@ -180,6 +180,7 @@ impl Workspace {
                                     .gap_1p5()
                                     .text_size(px(11.0))
                                     .child(div().text_color(state.color()).child(state.label()))
+                                    .child(div().text_color(T.text2).child(super::model_label(tab.agent, tab.model.as_deref())))
                                     .child(div().text_color(T.text3).truncate().child(tab.project.name.clone()))
                                     .when_some(since.filter(|_| state != AgentState::Working), |d, since| d.child(div().text_color(T.text3).child(since))),
                             ),
@@ -265,8 +266,98 @@ impl Workspace {
              Écris seulement si ça change son travail (fichier que tu modifies, conflit, résultat dont il a besoin) : \
              une ou deux phrases factuelles, sans politesse, remerciement ni accusé de réception. \
              Ne réponds à un message que si tu as quelque chose d'utile à dire. Les messages reçus arrivent en direct \
-             pendant ta tâche : adapte-toi aussitôt (ne refais pas ce qu'un autre vient de faire)."
+             pendant ta tâche : adapte-toi aussitôt (ne refais pas ce qu'un autre vient de faire). \
+             Pour une grosse tâche faite de parties indépendantes, mcp__supacode__agents_spawn crée des sous-agents \
+             dans la grille (de vrais terminaux que l'utilisateur voit et pilote), chacun avec le modèle adapté : \
+             préfère-le à tes sous-agents internes quand l'utilisateur doit pouvoir suivre ou corriger leur travail."
         )
+    }
+
+    /// Outil `agents_spawn` : ouvre des sous-agents dans la grille, chacun dans son terminal.
+    /// L'agent et le modèle de chacun viennent de l'orchestrateur du projet (sauf choix imposé),
+    /// ramenés dans les règles d'équipe. Ils ne prennent pas le focus.
+    pub(super) fn spawn_agents(&mut self, caller: Option<usize>, args: &Value, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<Vec<Content>> {
+        use supacode_core::router::{self, AgentId};
+        let list = args.get("agents").and_then(Value::as_array).filter(|a| !a.is_empty()).ok_or_else(|| anyhow::anyhow!("indique les sous-agents dans « agents » (une tâche chacun)"))?;
+        if list.len() > crate::mcp::MAX_SPAWN {
+            anyhow::bail!("{} sous-agents demandés, {} au plus par appel : regroupe les petites tâches", list.len(), crate::mcp::MAX_SPAWN);
+        }
+        let project = caller
+            .and_then(|c| self.tabs.iter().find(|t| t.id == c))
+            .map(|t| t.project.clone())
+            .or_else(|| self.current_project())
+            .ok_or_else(|| anyhow::anyhow!("aucun projet ouvert dans SupaCode"))?;
+        let config = router::load_config(&project.path).unwrap_or_default();
+        let policy = self.policy_for(&project.path).map_err(|e| anyhow::anyhow!("règles d'équipe invalides : {e}"))?;
+
+        // Tout est vérifié avant de lancer quoi que ce soit : pas de grille à moitié créée.
+        let mut plans = Vec::new();
+        for (index, item) in list.iter().enumerate() {
+            let task = item.get("task").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| anyhow::anyhow!("sous-agent {} : « task » est vide", index + 1))?;
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.chars().take(60).collect::<String>())
+                .unwrap_or_else(|| task.chars().take(48).collect());
+            let forced = match item.get("agent").and_then(Value::as_str).map(str::to_lowercase).as_deref() {
+                Some("claude") => Some(AgentId::Claude),
+                Some("codex") => Some(AgentId::Codex),
+                _ => None,
+            };
+            let model = item.get("model").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"));
+            let mut decision = router::route(task, &config, forced, model);
+            // Codex absent de la machine : Claude prend la tâche, avec le modèle prévu pour lui.
+            if decision.agent == AgentId::Codex && !self.codex_installed {
+                decision = router::route(task, &config, Some(AgentId::Claude), model);
+                decision.reason.push_str(" (Codex n'est pas installé)");
+            }
+            if let Some(policy) = &policy {
+                policy.constrain(&mut decision).map_err(|e| anyhow::anyhow!("sous-agent « {title} » : {e}"))?;
+            }
+            plans.push((task.to_owned(), title, decision));
+        }
+
+        let parent = caller.and_then(|c| self.tabs.iter().find(|t| t.id == c)).map(|t| format!("#{} « {} »", t.id, t.display_title()));
+        let mut lines = Vec::new();
+        for (task, title, decision) in plans {
+            let report = match (caller, decision.agent) {
+                (Some(c), AgentId::Claude) => format!(
+                    " Quand tu as fini, ou si tu es bloqué, envoie le résultat en une ou deux phrases à l'agent #{c} avec mcp__supacode__agent_send (to={c})."
+                ),
+                _ => String::new(),
+            };
+            let brief = format!(
+                "Tu es un sous-agent{} chargé de : {title}. L'utilisateur voit ta fenêtre dans la grille de SupaCode et peut t'écrire \
+                 directement : ses consignes priment sur celles de l'agent qui t'a créé. Reste dans ton périmètre ; si une autre \
+                 fenêtre travaille sur les mêmes fichiers, coordonne-toi avec elle.{report}",
+                parent.as_ref().map(|p| format!(" créé par l'agent {p}")).unwrap_or_default()
+            );
+            let launch = super::Launch {
+                agent: Some(decision.agent),
+                model: decision.model.clone(),
+                title: Some(title.clone()),
+                parent: caller,
+                brief: Some(brief),
+                background: true,
+            };
+            let label = super::model_label(decision.agent, decision.model.as_deref());
+            match self.open_conversation_checked(project.clone(), None, Some(task), launch, true, window, cx) {
+                Some(id) => lines.push(format!("- #{id} « {title} » : {label} ({})", decision.reason)),
+                None => lines.push(format!("- « {title} » : non lancé (règles d'équipe)")),
+            }
+        }
+        // Les sous-agents se voient dans la grille.
+        self.layout.grid = true;
+        self.grid_zoomed = false;
+        super::save_layout(self.layout);
+        cx.notify();
+        let follow = if caller.is_some() { " Ils t'enverront leur résultat avec agent_send ;" } else { "" };
+        Ok(vec![Content::Text(format!(
+            "Sous-agents créés dans la grille de SupaCode :\n{}\n\nL'utilisateur les voit et peut les piloter.{follow} agents_list et agent_read montrent où ils en sont.",
+            lines.join("\n")
+        ))])
     }
 
     /// Outils `agents_*` : exécutés ici, dans l'interface.
@@ -278,7 +369,9 @@ impl Workspace {
                 for tab in &self.tabs {
                     let me = if Some(tab.id) == caller { " (toi)" } else { "" };
                     let state = agent_state(tab, cx).label();
-                    text.push_str(&format!("- #{}{me} « {} » : {state}. Projet {} ({})\n", tab.id, tab.display_title(), tab.project.name, tab.project.path.display()));
+                    let model = super::model_label(tab.agent, tab.model.as_deref());
+                    let parent = tab.parent.map(|p| format!(", sous-agent de #{p}")).unwrap_or_default();
+                    text.push_str(&format!("- #{}{me} « {} » : {state}. {model}{parent}. Projet {} ({})\n", tab.id, tab.display_title(), tab.project.name, tab.project.path.display()));
                 }
                 Ok(vec![Content::Text(text)])
             }

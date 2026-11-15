@@ -65,7 +65,9 @@ pub fn write_claude_config(url: &str) -> Option<PathBuf> {
 
 fn serve(stream: TcpStream, path: &str, calls: &async_channel::Sender<Call>) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // Lecture et écriture sur la même connexion, sans la dupliquer : une copie (try_clone) pouvait
+    // être héritée par un programme lancé au même moment (git, claude) et garder la connexion ouverte.
+    let mut reader = BufReader::new(&stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -84,7 +86,11 @@ fn serve(stream: TcpStream, path: &str, calls: &async_channel::Sender<Call>) -> 
             _ => {}
         }
     }
-    let mut stream = stream;
+    // Le corps est lu avant toute réponse, même un refus : fermer la connexion avec des données
+    // non lues fait envoyer un « reset » par Windows, et le client perd la réponse.
+    let mut body = vec![0; length.min(16 << 20)];
+    reader.read_exact(&mut body)?;
+    let mut stream = &stream;
     let (target, query) = target.split_once('?').unwrap_or((target, ""));
     // Hook de Claude Code : `<chemin>/hook/<événement>/<agent>` (voir `hook_command`).
     let hook = target.strip_prefix(path).and_then(|rest| rest.strip_prefix("/hook/")).and_then(|rest| rest.split_once('/')).and_then(|(event, agent)| Some((event.to_owned(), agent.parse::<usize>().ok()?)));
@@ -99,8 +105,6 @@ fn serve(stream: TcpStream, path: &str, calls: &async_channel::Sender<Call>) -> 
         "DELETE" => return respond(&mut stream, "200 OK", None),
         _ => return respond(&mut stream, "405 Method Not Allowed", None),
     }
-    let mut body = vec![0; length.min(16 << 20)];
-    reader.read_exact(&mut body)?;
     // Hook de Claude Code (voir `hook_command`) : messages des autres agents en attente.
     if let Some((event, agent)) = hook {
         let text = match call(calls, Some(agent), INBOX_TOOL.into(), json!({ "event": event })) {
@@ -124,6 +128,10 @@ pub const MAX_MESSAGE: usize = 300;
 
 /// Outil interne (pas proposé aux agents) qui vide la boîte de réception d'un agent.
 pub const INBOX_TOOL: &str = "agent_inbox";
+/// Outil qui crée des sous-agents dans la grille (exécuté avec la fenêtre de l'application).
+pub const SPAWN_TOOL: &str = "agents_spawn";
+/// Sous-agents créés en un appel, au plus.
+pub const MAX_SPAWN: usize = 6;
 
 /// Hooks `PostToolUse` et `Stop` (type `http`) donnés à chaque agent : après chaque action,
 /// et avant de s'arrêter, Claude Code demande à SupaCode les messages en attente ; Claude les
@@ -148,13 +156,13 @@ fn hook_output(event: &str, text: &str) -> String {
     value.to_string()
 }
 
-fn respond_text(stream: &mut TcpStream, body: &str) -> Result<()> {
+fn respond_text(stream: &mut impl Write, body: &str) -> Result<()> {
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
     stream.flush()?;
     Ok(())
 }
 
-fn respond(stream: &mut TcpStream, status: &str, body: Option<&Value>) -> Result<()> {
+fn respond(stream: &mut impl Write, status: &str, body: Option<&Value>) -> Result<()> {
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let kind = if body.is_empty() { "" } else { "Content-Type: application/json; charset=utf-8\r\n" };
     write!(stream, "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
@@ -228,10 +236,18 @@ fn instructions(access: &Access) -> String {
     if access.agent.is_some() {
         text.push_str(
             "Plusieurs agents peuvent tourner dans SupaCode, chacun dans sa fenêtre. agents_list les montre \
-             avec leur état, agent_read affiche l'écran d'un agent et agent_send lui écrit.",
+             avec leur état, agent_read affiche l'écran d'un agent et agent_send lui écrit. agents_spawn crée \
+             des sous-agents dans la grille : de vrais terminaux que l'utilisateur voit et pilote, chacun avec le \
+             modèle adapté à sa tâche.",
         );
     }
     text
+}
+
+/// Noms des outils que le serveur donne à une fenêtre d'agent (affichés dans l'onglet Extensions).
+pub fn agent_tool_names(browser: bool) -> Vec<String> {
+    let access = Access { agent: Some(0), browser };
+    tools(&access).as_array().into_iter().flatten().filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_owned)).collect()
 }
 
 fn tools(access: &Access) -> Value {
@@ -261,6 +277,31 @@ fn agent_tools() -> Value {
             "name": "agent_send",
             "description": "Envoie un message court à un autre agent (300 caractères au plus), seulement s'il change son travail : fichier ou fonction que tu modifies, conflit, résultat dont il a besoin. Pas de politesse, de remerciement ni d'accusé de réception. Il le lit en direct dès sa prochaine action.",
             "inputSchema": { "type": "object", "properties": { "to": { "type": "integer", "description": "Numéro de la fenêtre destinataire (agents_list)." }, "message": { "type": "string", "maxLength": 300, "description": "Une ou deux phrases factuelles." } }, "required": ["to", "message"] },
+        },
+        {
+            "name": SPAWN_TOOL,
+            "description": "Crée des sous-agents dans la grille de SupaCode, pour mener en parallèle les parties indépendantes d'une grosse tâche. Chacun est un vrai terminal (Claude Code ou Codex) que l'utilisateur voit travailler et peut piloter : il peut lui écrire, le corriger ou l'arrêter. SupaCode choisit l'agent et le modèle de chacun selon sa tâche (orchestrateur du projet et règles d'équipe), sauf si tu les imposes. Chaque sous-agent t'envoie son résultat avec agent_send ; suis-les avec agents_list et agent_read. Ne découpe pas une petite tâche.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agents": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_SPAWN,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Titre court affiché sur la tuile (quelques mots)." },
+                                "task": { "type": "string", "description": "Consigne complète et autonome : le sous-agent ne voit pas ta conversation (fichiers, contraintes, ce qu'il doit te renvoyer)." },
+                                "agent": { "type": "string", "enum": ["auto", "claude", "codex"], "description": "auto (défaut) : choisi par l'orchestrateur." },
+                                "model": { "type": "string", "description": "haiku, sonnet, opus… ou auto (défaut) : choisi selon la tâche." }
+                            },
+                            "required": ["task"]
+                        }
+                    }
+                },
+                "required": ["agents"]
+            },
         },
     ])
 }
@@ -347,6 +388,15 @@ mod tests {
         let mut answer = String::new();
         stream.read_to_string(&mut answer).unwrap();
         answer.split_once("\r\n\r\n").unwrap().1.to_owned()
+    }
+
+    #[test]
+    fn les_agents_peuvent_creer_des_sous_agents() {
+        let names = agent_tool_names(false);
+        assert!(names.iter().any(|n| n == SPAWN_TOOL));
+        assert!(names.iter().any(|n| n == "agent_send"));
+        assert!(!names.iter().any(|n| n.starts_with("browser_")));
+        assert!(agent_tool_names(true).iter().any(|n| n == "browser_open"));
     }
 
     #[test]

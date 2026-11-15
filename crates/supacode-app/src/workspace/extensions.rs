@@ -595,6 +595,34 @@ N'accepte que si tu fais confiance à cette source.", confirmation.command);
 
     fn render_mcp(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut list = div().id("mcp-list").flex_1().min_h_0().overflow_y_scroll().px_2().flex().flex_col().gap(px(2.0));
+        // Le serveur de SupaCode lui-même : branché sur chaque agent qu'il lance, toujours actif.
+        let running = self.mcp_url.is_some();
+        let tools = crate::mcp::agent_tool_names(self.browser_tools_enabled());
+        list = list.child(
+            div()
+                .id("mcp-supacode")
+                .px_1p5()
+                .py(px(7.0))
+                .mb_1()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(T.border)
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(div().font_weight(FontWeight::MEDIUM).child("supacode"))
+                        .child(tag("intégré".into()))
+                        .child(div().flex_1())
+                        .child(div().text_size(px(11.0)).text_color(if running { T.ok } else { T.err }).child(if running { "● branché sur chaque agent" } else { "○ indisponible" })),
+                )
+                .child(div().text_size(px(11.0)).text_color(T.text2).child("Navigateur de SupaCode, et les autres agents : se voir, s'écrire, créer des sous-agents dans la grille."))
+                .child(div().text_size(px(11.0)).text_color(T.text3).font_family(theme::MONO_FONT).child(tools.join(" · "))),
+        );
         for (i, server) in self.extensions.mcp.clone().into_iter().enumerate() {
             let name = server.name.clone();
             list = list.child(
